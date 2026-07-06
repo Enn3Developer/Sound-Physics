@@ -1,6 +1,7 @@
 package com.sonicether.soundphysics;
 
 import cpw.mods.fml.client.event.ConfigChangedEvent;
+import cpw.mods.fml.common.Loader;
 import cpw.mods.fml.common.Mod;
 import cpw.mods.fml.common.event.FMLInitializationEvent;
 import cpw.mods.fml.common.event.FMLPreInitializationEvent;
@@ -33,7 +34,7 @@ import java.util.ListIterator;
 import java.util.regex.Pattern;
 
 @Mod(modid = SoundPhysics.modid, name = SoundPhysics.modName, acceptedMinecraftVersions = SoundPhysics.mcVersion, version = SoundPhysics.version, guiFactory = "com.sonicether.soundphysics.SPGuiFactory",
-	dependencies="before:computronics;required-after:gtnhmixins@[2.0.0,)") // Dependencies to make sure that SP's config is loaded before patching Computronics
+	dependencies="before:computronics;required-after:gtnhmixins@[2.0.0,);after:gtnhvoice") // 'before:computronics' loads SP's config before patching Computronics; 'after:gtnhvoice' (optional, not required) makes SP init run after gtnh-voice so its client API backend is ready when the VoiceIntegration bridge fires
 // Escape lwjgl3ify's org.lwjgl -> org.lwjglx redirect: this class calls the real LWJGL3 AL API directly.
 // The annotation is per class FILE, so the AL-touching nested classes below carry their own copies.
 @Lwjgl3Aware
@@ -60,6 +61,14 @@ public class SoundPhysics {
 	@Mod.EventHandler
 	public void init(final FMLInitializationEvent event) {
 		MinecraftForge.EVENT_BUS.register(this);
+
+		// Sole bridge to the optional gtnh-voice integration. Guarded by the mod's
+		// presence so nothing in the com.sonicether.soundphysics.voice package (which
+		// alone imports gtnh-voice) is class-loaded when the mod is absent. This line
+		// is the ONLY reference to the voice package from outside it.
+		if (Loader.isModLoaded("gtnhvoice")) {
+			com.sonicether.soundphysics.voice.VoiceIntegration.register();
+		}
 	}
 
 	@SubscribeEvent
@@ -489,6 +498,16 @@ public class SoundPhysics {
 			e.printStackTrace();
 			efxPipeline.apply(sourceID, SoundEnvironment.passthrough());
 		}
+	}
+
+	// Voice path entry point (proximity chat occlusion). AL-free like
+	// computeEnvironment: runs on the client tick thread and returns an
+	// occlusion-only environment (neutral reverb sends) via isRain=true, reusing
+	// the exact same occlusion math and Config values as game sounds. The voice
+	// integration package is the only caller; keep it AL-free so it never has to
+	// touch the voice audio thread.
+	public static SoundEnvironment computeVoiceEnvironment(final World world, final Vec3 playerPos, final Vec3 speakerPos) {
+		return computeEnvironment(world, playerPos, speakerPos, true);
 	}
 
 	// Core environment compute: pure with respect to AL (no AL10/AL11/EFX10

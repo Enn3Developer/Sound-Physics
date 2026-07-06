@@ -1,5 +1,8 @@
 // Add any additional repositories for your dependencies here.
 
 repositories {
-
+    // JitPack: serves the gtnh-voice addon API/dev jars used by the optional voice proximity-chat integration.
+    maven {
+        url = "https://jitpack.io"
+    }
 }

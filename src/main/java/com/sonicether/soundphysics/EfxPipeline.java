@@ -32,16 +32,26 @@ public class EfxPipeline {
 	private int sendFilter3;
 
 	/**
-	 * Creates the EFX objects on the current AL context. Must be called on a
-	 * thread with that context current. On a device without ALC_EXT_EFX this
-	 * is a no-op and the pipeline stays uninitialized.
+	 * Game path: self-discovers the device from the process-current context and
+	 * initializes on it. Correct for the Minecraft/paulscode sound thread, which
+	 * owns the process-global context. Do NOT use this on the voice audio thread:
+	 * gtnh-voice binds its context via EXTThreadLocalContext, so the process-global
+	 * {@link ALC10#alcGetCurrentContext} would resolve to Minecraft's context, not
+	 * the voice one — pass that thread's real device to {@link #init(long)} instead.
 	 */
 	public EfxPipeline init() {
-		// Get current context and device
-		final long currentContext = ALC10.alcGetCurrentContext();
-		final long currentDevice = ALC10.alcGetContextsDevice(currentContext);
+		return init(ALC10.alcGetContextsDevice(ALC10.alcGetCurrentContext()));
+	}
 
-		if (!ALC10.alcIsExtensionPresent(currentDevice, "ALC_EXT_EFX")) {
+	/**
+	 * Checks ALC_EXT_EFX on {@code deviceHandle}, then creates the EFX objects on
+	 * the thread-current context. The AL10/EXTEfx gen calls honor the thread-local
+	 * context, so this is correct on both the Minecraft sound thread and the voice
+	 * audio thread. On a device without ALC_EXT_EFX this is a no-op and the pipeline
+	 * stays uninitialized. Must be called on a thread with the target context current.
+	 */
+	public EfxPipeline init(final long deviceHandle) {
+		if (!ALC10.alcIsExtensionPresent(deviceHandle, "ALC_EXT_EFX")) {
 			SoundPhysics.logError("EFX Extension not found on current device. Aborting.");
 			return this;
 		}

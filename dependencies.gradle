@@ -46,4 +46,19 @@ dependencies {
     // bundling our own here would risk duplicate/conflicting LWJGL3 classes, and (like lwjgl3ify above)
     // must never reach runServer.
     compileOnly("org.lwjgl:lwjgl-openal:3.3.3")
+
+    // gtnh-voice addon API (@Lwjgl3Aware voice audio hooks). OPTIONAL at runtime: only the classes in the
+    // com.sonicether.soundphysics.voice package touch it, and the sole bridge (SoundPhysics.init guarded by
+    // Loader.isModLoaded("gtnhvoice")) never runs when the mod is absent. compileOnly so it is never published
+    // as a dependency and never forced onto downstream runtimes.
+    compileOnly("com.github.Enn3Developer:gtnh-voice:v0.7.0:api")
+
+    // Full gtnh-voice mod, present only in runClient for two-way voice testing. devOnlyNonPublishable keeps it
+    // off every published dependency graph; never depend on this from mod code. gtnh-voice pulls unimixins
+    // transitively (default classifier); the runClient environment already provides unimixins (dev classifier),
+    // and both landing on the classpath makes FML abort with "duplicate mod sources" — so exclude the transitive
+    // copy and let the base run environment supply the one unimixins.
+    devOnlyNonPublishable("com.github.Enn3Developer:gtnh-voice:v0.7.0:dev") {
+        exclude group: "io.github.legacymoddingmc", module: "unimixins"
+    }
 }
