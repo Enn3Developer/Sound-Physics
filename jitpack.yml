@@ -1,2 +1,11 @@
+# JitPack build config (https://docs.jitpack.io) - lets addon authors resolve this mod
+# as a maven dependency with no hosted infrastructure:
+#   repositories { maven { url "https://jitpack.io" } }
+#   dependencies { compileOnly "com.github.Enn3Developer:Sound-Physics:<tag>:dev" }
+# JitPack's default JDK is 8; GTNHGradle needs a modern one (matches CI's JDK 25).
+jdk:
+  - openjdk25
 before_install:
   - ./gradlew setupCIWorkspace
+install:
+  - ./gradlew --build-cache publishToMavenLocal
