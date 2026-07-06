@@ -14,14 +14,10 @@ import net.minecraft.util.EnumFacing;
 import net.minecraft.util.MathHelper;
 import net.minecraft.util.MovingObjectPosition;
 import net.minecraft.util.Vec3;
+import net.minecraft.world.World;
 import net.minecraftforge.common.MinecraftForge;
 import org.lwjgl.BufferUtils;
 import org.lwjgl.openal.AL10;
-import org.lwjgl.openal.AL11;
-import org.lwjgl.openal.ALC10;
-import org.lwjgl.openal.ALCcontext;
-import org.lwjgl.openal.ALCdevice;
-import org.lwjgl.openal.EFX10;
 import paulscode.sound.SoundBuffer;
 import paulscode.sound.SoundSystemConfig;
 
@@ -72,19 +68,9 @@ public class SoundPhysics {
 	}
 
 	private static final String logPrefix = "[SOUND PHYSICS]";
-	private static int auxFXSlot0;
-	private static int auxFXSlot1;
-	private static int auxFXSlot2;
-	private static int auxFXSlot3;
-	private static int reverb0;
-	private static int reverb1;
-	private static int reverb2;
-	private static int reverb3;
-	private static int directFilter0;
-	private static int sendFilter0;
-	private static int sendFilter1;
-	private static int sendFilter2;
-	private static int sendFilter3;
+	// EFX pipeline for the Minecraft/paulscode AL context; AL objects are
+	// created in init(), on the sound system thread.
+	private static final EfxPipeline efxPipeline = new EfxPipeline();
 
 	private static Minecraft mc;
 
@@ -105,7 +91,9 @@ public class SoundPhysics {
 	 * CALLED BY Mixin INJECTED CODE!
 	 */
 	public static void init() {
-		setupEFX();
+		if (efxPipeline.init().isInitialized()) {
+			applyConfigChanges();
+		}
 		mc = Minecraft.getMinecraft();
 		setupThread();
 	}
@@ -247,77 +235,9 @@ public class SoundPhysics {
 		globalReverbMultiplier = 0.7f * Config.globalReverbGain;
 		soundDistanceAllowance = Config.soundDistanceAllowance;
 
-		if (auxFXSlot0 != 0) {
-			// Set the global reverb parameters and apply them to the effect and
-			// effectslot
-			setReverbParams(ReverbParams.getReverb0(), auxFXSlot0, reverb0);
-			setReverbParams(ReverbParams.getReverb1(), auxFXSlot1, reverb1);
-			setReverbParams(ReverbParams.getReverb2(), auxFXSlot2, reverb2);
-			setReverbParams(ReverbParams.getReverb3(), auxFXSlot3, reverb3);
-		}
-	}
-
-	private static void setupEFX() {
-		// Get current context and device
-		final ALCcontext currentContext = ALC10.alcGetCurrentContext();
-		final ALCdevice currentDevice = ALC10.alcGetContextsDevice(currentContext);
-
-		if (ALC10.alcIsExtensionPresent(currentDevice, "ALC_EXT_EFX")) {
-			log("EFX Extension recognized.");
-		} else {
-			logError("EFX Extension not found on current device. Aborting.");
-			return;
-		}
-
-		// Create auxiliary effect slots
-		auxFXSlot0 = EFX10.alGenAuxiliaryEffectSlots();
-		log("Aux slot " + auxFXSlot0 + " created");
-		EFX10.alAuxiliaryEffectSloti(auxFXSlot0, EFX10.AL_EFFECTSLOT_AUXILIARY_SEND_AUTO, AL10.AL_TRUE);
-
-		auxFXSlot1 = EFX10.alGenAuxiliaryEffectSlots();
-		log("Aux slot " + auxFXSlot1 + " created");
-		EFX10.alAuxiliaryEffectSloti(auxFXSlot1, EFX10.AL_EFFECTSLOT_AUXILIARY_SEND_AUTO, AL10.AL_TRUE);
-
-		auxFXSlot2 = EFX10.alGenAuxiliaryEffectSlots();
-		log("Aux slot " + auxFXSlot2 + " created");
-		EFX10.alAuxiliaryEffectSloti(auxFXSlot2, EFX10.AL_EFFECTSLOT_AUXILIARY_SEND_AUTO, AL10.AL_TRUE);
-
-		auxFXSlot3 = EFX10.alGenAuxiliaryEffectSlots();
-		log("Aux slot " + auxFXSlot3 + " created");
-		EFX10.alAuxiliaryEffectSloti(auxFXSlot3, EFX10.AL_EFFECTSLOT_AUXILIARY_SEND_AUTO, AL10.AL_TRUE);
-		checkErrorLog("Failed creating auxiliary effect slots!");
-
-		reverb0 = EFX10.alGenEffects();
-		EFX10.alEffecti(reverb0, EFX10.AL_EFFECT_TYPE, EFX10.AL_EFFECT_EAXREVERB);
-		checkErrorLog("Failed creating reverb effect slot 0!");
-		reverb1 = EFX10.alGenEffects();
-		EFX10.alEffecti(reverb1, EFX10.AL_EFFECT_TYPE, EFX10.AL_EFFECT_EAXREVERB);
-		checkErrorLog("Failed creating reverb effect slot 1!");
-		reverb2 = EFX10.alGenEffects();
-		EFX10.alEffecti(reverb2, EFX10.AL_EFFECT_TYPE, EFX10.AL_EFFECT_EAXREVERB);
-		checkErrorLog("Failed creating reverb effect slot 2!");
-		reverb3 = EFX10.alGenEffects();
-		EFX10.alEffecti(reverb3, EFX10.AL_EFFECT_TYPE, EFX10.AL_EFFECT_EAXREVERB);
-		checkErrorLog("Failed creating reverb effect slot 3!");
-
-		// Create filters
-		directFilter0 = EFX10.alGenFilters();
-		EFX10.alFilteri(directFilter0, EFX10.AL_FILTER_TYPE, EFX10.AL_FILTER_LOWPASS);
-
-		sendFilter0 = EFX10.alGenFilters();
-		EFX10.alFilteri(sendFilter0, EFX10.AL_FILTER_TYPE, EFX10.AL_FILTER_LOWPASS);
-
-		sendFilter1 = EFX10.alGenFilters();
-		EFX10.alFilteri(sendFilter1, EFX10.AL_FILTER_TYPE, EFX10.AL_FILTER_LOWPASS);
-
-		sendFilter2 = EFX10.alGenFilters();
-		EFX10.alFilteri(sendFilter2, EFX10.AL_FILTER_TYPE, EFX10.AL_FILTER_LOWPASS);
-
-		sendFilter3 = EFX10.alGenFilters();
-		EFX10.alFilteri(sendFilter3, EFX10.AL_FILTER_TYPE, EFX10.AL_FILTER_LOWPASS);
-		checkErrorLog("Error creating lowpass filters!");
-
-		applyConfigChanges();
+		// Set the global reverb parameters and apply them to the effects and
+		// effect slots (no-op until the pipeline is initialized)
+		efxPipeline.applyReverbPresets();
 	}
 
 	/**
@@ -413,33 +333,23 @@ public class SoundPhysics {
 	// Unused
 	private static int isSnowingAt(Vec3 position)
 	{
-		return isSnowingAt(position, true);
+		return isSnowingAt(mc.theWorld, position, true);
 	}
 
 	// Copy of isRainingAt (1.12.2)
-	private static int isSnowingAt(Vec3 position, boolean check_rain)
+	private static int isSnowingAt(final World world, final Vec3 position, final boolean check_rain)
 	{
-		if (check_rain && !mc.theWorld.isRaining()) {
-			return 0;
-		}
-		else if (!mc.theWorld.canBlockSeeTheSky((int)position.xCoord,(int)position.yCoord,(int)position.zCoord))
-		{
-			return 0;
-		}
-		else if (mc.theWorld.getPrecipitationHeight((int)position.xCoord,(int)position.zCoord) > position.yCoord)
-		{
-			return 0;
-		}
-		else
-		{
-			/*boolean cansnow = mc.theWorld.canSnowAt(position, false);
-			if (mc.theWorld.getBiome(position).getEnableSnow() && cansnow) return true;
-			else if (cansnow) return true;
-			else return false;*/
-								//canSnowAt() but the name isn't there
-			return (mc.theWorld.func_147478_e((int)position.xCoord,(int)position.yCoord,(int)position.zCoord, false) | 
-				mc.theWorld.getBiomeGenForCoords((int)position.xCoord,(int)position.zCoord).getEnableSnow()) ? 1 : 0;
-		}
+		if (check_rain && !world.isRaining()) return 0;
+		if (!world.canBlockSeeTheSky((int)position.xCoord,(int)position.yCoord,(int)position.zCoord)) return 0;
+		if (world.getPrecipitationHeight((int)position.xCoord,(int)position.zCoord) > position.yCoord) return 0;
+
+		/*boolean cansnow = mc.theWorld.canSnowAt(position, false);
+		if (mc.theWorld.getBiome(position).getEnableSnow() && cansnow) return true;
+		else if (cansnow) return true;
+		else return false;*/
+							//canSnowAt() but the name isn't there
+		return (world.func_147478_e((int)position.xCoord,(int)position.yCoord,(int)position.zCoord, false) |
+			world.getBiomeGenForCoords((int)position.xCoord,(int)position.zCoord).getEnableSnow()) ? 1 : 0;
 	}
 
 	private static float getBlockReflectivity(final Block block) {
@@ -543,358 +453,321 @@ public class SoundPhysics {
 		return Vec3.createVectorHelper(soundX + offsetX, soundY + offsetY, soundZ + offsetZ);
 	}
 
+	// Game-specific entry point: guards, sound-name heuristics and source
+	// offsetting, then core compute, then apply through the EFX pipeline.
+	// Called from both the ProcThread and the paulscode thread; the shared
+	// send filters are a pre-existing benign race, kept lock-free on purpose.
 	private static void evaluateEnvironment(final int sourceID, final float posX, final float posY, final float posZ, final SoundCategory category, final String name) {
 		try {
 			if (mc.thePlayer == null | mc.theWorld == null | posY <= 0 | category == SoundCategory.RECORDS
 					| category == SoundCategory.MUSIC) {
 				// posY <= 0 as a condition has to be there: Ingame
 				// menu clicks do have a player and world present
-				setEnvironment(sourceID, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f);
+				efxPipeline.apply(sourceID, SoundEnvironment.passthrough());
 				return;
 			}
 
 			final boolean isRain = rainPattern.matcher(name).matches();
 
 			if (Config.skipRainOcclusionTracing && isRain) {
-				setEnvironment(sourceID, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f);
+				efxPipeline.apply(sourceID, SoundEnvironment.passthrough());
 				return;
 			}
-
-			float directCutoff = 1.0f;
-			final float absorptionCoeff = Config.globalBlockAbsorption * 3.0f;
 
 			final Vec3 playerPos = Vec3.createVectorHelper(mc.thePlayer.posX, mc.thePlayer.posY + mc.thePlayer.getEyeHeight(), mc.thePlayer.posZ);
 			final Vec3 soundPos = offsetSoundByName(posX, posY, posZ, playerPos, name, category);
-			final Vec3 normalToPlayer = playerPos.subtract(soundPos).normalize();
 
-			float snowFactor = 0.0f;
-
-			if (mc.theWorld.isRaining()) {
-				final Vec3 middlePos = playerPos.addVector(soundPos.xCoord,soundPos.yCoord,soundPos.zCoord);
-				middlePos.xCoord = middlePos.xCoord*0.5d;
-				middlePos.yCoord = middlePos.yCoord*0.5d;
-				middlePos.zCoord = middlePos.zCoord*0.5d;
-				final int snowingPlayer = isSnowingAt(playerPos,false);
-				final int snowingSound = isSnowingAt(soundPos,false);
-				final int snowingMiddle = isSnowingAt(middlePos,false);
-				snowFactor = snowingPlayer * 0.25f + snowingMiddle * 0.5f + snowingSound * 0.25f;
-			}
-
-			float airAbsorptionFactor = 1.0f;
-
-			if (snowFactor > 0.0f) {
-				airAbsorptionFactor = Math.max(Config.snowAirAbsorptionFactor*mc.theWorld.getRainStrength(1.0f)*snowFactor,airAbsorptionFactor);
-			}
-
-			/*final double distance = playerPos.distanceTo(soundPos);
-			final double time = (distance/343.3)*1000;
-			AL10.alSourcePause(sourceID);
-			log("paused, time "+String.valueOf(time));
-
-			new java.util.Timer().schedule( 
-				new java.util.TimerTask() {
-					@Override
-					public void run() {
-						log("play, time "+String.valueOf(time));
-						AL10.alSourcePlay(sourceID);
-					}
-				}, 
-				(long)time 
-			);*/
-
-			Vec3 rayOrigin = soundPos;
-
-			float occlusionAccumulation = 0.0f;
-
-			for (int i = 0; i < 10; i++) {
-				final MovingObjectPosition rayHit = mc.theWorld.rayTraceBlocks(rayOrigin, playerPos, true);
-
-				if (rayHit == null) {
-					break;
-				}
-
-				final Block blockHit = mc.theWorld.getBlock(rayHit.blockX,rayHit.blockY,rayHit.blockZ);
-
-				float blockOcclusion = 1.0f;
-
-				if (!blockHit.isOpaqueCube()) {
-					// log("not a solid block!");
-					blockOcclusion *= 0.15f;
-				}
-
-				occlusionAccumulation += blockOcclusion;
-
-				rayOrigin = Vec3.createVectorHelper(rayHit.hitVec.xCoord + normalToPlayer.xCoord * 0.1, rayHit.hitVec.yCoord + normalToPlayer.yCoord * 0.1,
-						rayHit.hitVec.zCoord + normalToPlayer.zCoord * 0.1);
-			}
-
-			directCutoff = (float) Math.exp(-occlusionAccumulation * absorptionCoeff);
-			float directGain = (float) Math.pow(directCutoff, 0.1);
-
-			// Calculate reverb parameters for this sound
-			float sendGain0 = 0.0f;
-			float sendGain1 = 0.0f;
-			float sendGain2 = 0.0f;
-			float sendGain3 = 0.0f;
-
-			float sendCutoff0 = 1.0f;
-			float sendCutoff1 = 1.0f;
-			float sendCutoff2 = 1.0f;
-			float sendCutoff3 = 1.0f;
-
-			if (mc.thePlayer.isInsideOfMaterial(Material.water)) {
-				directCutoff *= 1.0f - Config.underwaterFilter;
-			}
-
-			if (isRain) {
-				setEnvironment(sourceID, sendGain0, sendGain1, sendGain2, sendGain3, sendCutoff0, sendCutoff1, sendCutoff2,
-						sendCutoff3, directCutoff, directGain, airAbsorptionFactor);
-				return;
-			}
-
-			// Shoot rays around sound
-			final float phi = 1.618033988f;
-			final float gAngle = phi * (float) Math.PI * 2.0f;
-			final float maxDistance = 256.0f;
-
-			final int numRays = Config.environmentEvaluationRays;
-			final int rayBounces = Config.environmentEvaluationRaysBounces;
-
-			final float[] bounceReflectivityRatio = new float[rayBounces];
-
-			float sharedAirspace = 0.0f;
-
-			final float rcpTotalRays = 1.0f / (numRays * rayBounces);
-			final float rcpPrimaryRays = 1.0f / numRays;
-
-			for (int i = 0; i < numRays; i++) {
-				final float fiN = (float) i / numRays;
-				final float longitude = gAngle * (float) i;
-				final float latitude = (float) Math.asin(fiN * 2.0f - 1.0f);
-
-				final Vec3 rayDir = Vec3.createVectorHelper(Math.cos(latitude) * Math.cos(longitude),
-						Math.cos(latitude) * Math.sin(longitude), Math.sin(latitude));
-
-				final Vec3 rayStart = Vec3.createVectorHelper(soundPos.xCoord, soundPos.yCoord, soundPos.zCoord);
-
-				final Vec3 rayEnd = Vec3.createVectorHelper(rayStart.xCoord + rayDir.xCoord * maxDistance, rayStart.yCoord + rayDir.yCoord * maxDistance,
-						rayStart.zCoord + rayDir.zCoord * maxDistance);
-
-				final MovingObjectPosition rayHit = mc.theWorld.rayTraceBlocks(rayStart, rayEnd, true);
-
-				if (rayHit != null) {
-					final double rayLength = soundPos.distanceTo(rayHit.hitVec);
-
-					// Additional bounces
-					Block lastHitBlock = mc.theWorld.getBlock(rayHit.blockX,rayHit.blockY,rayHit.blockZ);
-					Vec3 lastHitPos = rayHit.hitVec;
-					Vec3 lastHitNormal = getNormalFromFacing(rayHit.sideHit);
-					Vec3 lastRayDir = rayDir;
-
-					float totalRayDistance = (float) rayLength;
-
-					// Secondary ray bounces
-					for (int j = 0; j < rayBounces; j++) {
-						final Vec3 newRayDir = reflect(lastRayDir, lastHitNormal);
-						// Vec3 newRayDir = lastHitNormal;
-						final Vec3 newRayStart = Vec3.createVectorHelper(lastHitPos.xCoord + lastHitNormal.xCoord * 0.01,
-								lastHitPos.yCoord + lastHitNormal.yCoord * 0.01, lastHitPos.zCoord + lastHitNormal.zCoord * 0.01);
-						final Vec3 newRayEnd = Vec3.createVectorHelper(newRayStart.xCoord + newRayDir.xCoord * maxDistance,
-								newRayStart.yCoord + newRayDir.yCoord * maxDistance, newRayStart.zCoord + newRayDir.zCoord * maxDistance);
-
-						final MovingObjectPosition newRayHit = mc.theWorld.rayTraceBlocks(newRayStart, newRayEnd, true);
-
-						float energyTowardsPlayer = 0.25f;
-						final float blockReflectivity = getBlockReflectivity(lastHitBlock);
-						energyTowardsPlayer *= blockReflectivity * 0.75f + 0.25f;
-
-						if (newRayHit == null) {
-							totalRayDistance += lastHitPos.distanceTo(playerPos);
-						} else {
-							final double newRayLength = lastHitPos.distanceTo(newRayHit.hitVec);
-
-							bounceReflectivityRatio[j] += blockReflectivity;
-
-							totalRayDistance += newRayLength;
-
-							lastHitPos = newRayHit.hitVec;
-							lastHitNormal = getNormalFromFacing(newRayHit.sideHit);
-							lastRayDir = newRayDir;
-							lastHitBlock = mc.theWorld.getBlock(newRayHit.blockX,newRayHit.blockY,newRayHit.blockZ);
-
-							// Cast one final ray towards the player. If it's
-							// unobstructed, then the sound source and the player
-							// share airspace.
-							if (!Config.simplerSharedAirspaceSimulation || j == rayBounces - 1) {
-								final Vec3 finalRayStart = Vec3.createVectorHelper(lastHitPos.xCoord + lastHitNormal.xCoord * 0.01,
-										lastHitPos.yCoord + lastHitNormal.yCoord * 0.01, lastHitPos.zCoord + lastHitNormal.zCoord * 0.01);
-
-								final MovingObjectPosition finalRayHit = mc.theWorld.rayTraceBlocks(finalRayStart, playerPos, true);
-
-								if (finalRayHit == null) {
-									// log("Secondary ray hit the player!");
-									sharedAirspace += 1.0f;
-								}
-							}
-						}
-
-						final float reflectionDelay = (float) Math.max(totalRayDistance, 0.0) * 0.12f * blockReflectivity;
-
-						final float cross0 = 1.0f - MathHelper.clamp_float(Math.abs(reflectionDelay - 0.0f), 0.0f, 1.0f);
-						final float cross1 = 1.0f - MathHelper.clamp_float(Math.abs(reflectionDelay - 1.0f), 0.0f, 1.0f);
-						final float cross2 = 1.0f - MathHelper.clamp_float(Math.abs(reflectionDelay - 2.0f), 0.0f, 1.0f);
-						final float cross3 = MathHelper.clamp_float(reflectionDelay - 2.0f, 0.0f, 1.0f);
-
-						sendGain0 += cross0 * energyTowardsPlayer * 6.4f * rcpTotalRays;
-						sendGain1 += cross1 * energyTowardsPlayer * 12.8f * rcpTotalRays;
-						sendGain2 += cross2 * energyTowardsPlayer * 12.8f * rcpTotalRays;
-						sendGain3 += cross3 * energyTowardsPlayer * 12.8f * rcpTotalRays;
-
-						// Nowhere to bounce off of, stop bouncing!
-						if (newRayHit == null) {
-							break;
-						}
-					}
-				}
-
-			}
-
-			// log("total reflectivity ratio: " + totalReflectivityRatio);
-
-			bounceReflectivityRatio[0] = bounceReflectivityRatio[0] / numRays;
-			bounceReflectivityRatio[1] = bounceReflectivityRatio[1] / numRays;
-			bounceReflectivityRatio[2] = bounceReflectivityRatio[2] / numRays;
-			bounceReflectivityRatio[3] = bounceReflectivityRatio[3] / numRays;
-
-			sharedAirspace *= 64.0f;
-
-			if (Config.simplerSharedAirspaceSimulation) {
-				sharedAirspace *= rcpPrimaryRays;
-			} else {
-				sharedAirspace *= rcpTotalRays;
-			}
-
-			final float sharedAirspaceWeight0 = MathHelper.clamp_float(sharedAirspace / 20.0f, 0.0f, 1.0f);
-			final float sharedAirspaceWeight1 = MathHelper.clamp_float(sharedAirspace / 15.0f, 0.0f, 1.0f);
-			final float sharedAirspaceWeight2 = MathHelper.clamp_float(sharedAirspace / 10.0f, 0.0f, 1.0f);
-			final float sharedAirspaceWeight3 = MathHelper.clamp_float(sharedAirspace / 10.0f, 0.0f, 1.0f);
-
-			sendCutoff0 = (float) Math.exp(-occlusionAccumulation * absorptionCoeff * 1.0f) * (1.0f - sharedAirspaceWeight0)
-					+ sharedAirspaceWeight0;
-			sendCutoff1 = (float) Math.exp(-occlusionAccumulation * absorptionCoeff * 1.0f) * (1.0f - sharedAirspaceWeight1)
-					+ sharedAirspaceWeight1;
-			sendCutoff2 = (float) Math.exp(-occlusionAccumulation * absorptionCoeff * 1.5f) * (1.0f - sharedAirspaceWeight2)
-					+ sharedAirspaceWeight2;
-			sendCutoff3 = (float) Math.exp(-occlusionAccumulation * absorptionCoeff * 1.5f) * (1.0f - sharedAirspaceWeight3)
-					+ sharedAirspaceWeight3;
-
-			// attempt to preserve directionality when airspace is shared by
-			// allowing some of the dry signal through but filtered
-			final float averageSharedAirspace = (sharedAirspaceWeight0 + sharedAirspaceWeight1 + sharedAirspaceWeight2
-					+ sharedAirspaceWeight3) * 0.25f;
-			directCutoff = Math.max((float) Math.pow(averageSharedAirspace, 0.5) * 0.2f, directCutoff);
-
-			directGain = (float) Math.pow(directCutoff, 0.1);
-
-			sendGain1 *= bounceReflectivityRatio[1];
-			sendGain2 *= (float) Math.pow(bounceReflectivityRatio[2], 3.0);
-			sendGain3 *= (float) Math.pow(bounceReflectivityRatio[3], 4.0);
-
-			sendGain0 = MathHelper.clamp_float(sendGain0, 0.0f, 1.0f);
-			sendGain1 = MathHelper.clamp_float(sendGain1, 0.0f, 1.0f);
-			sendGain2 = MathHelper.clamp_float(sendGain2 * 1.05f - 0.05f, 0.0f, 1.0f);
-			sendGain3 = MathHelper.clamp_float(sendGain3 * 1.05f - 0.05f, 0.0f, 1.0f);
-
-			sendGain0 *= (float) Math.pow(sendCutoff0, 0.1);
-			sendGain1 *= (float) Math.pow(sendCutoff1, 0.1);
-			sendGain2 *= (float) Math.pow(sendCutoff2, 0.1);
-			sendGain3 *= (float) Math.pow(sendCutoff3, 0.1);
-
-			if (mc.thePlayer.isInWater()) {
-				sendCutoff0 *= 0.4f;
-				sendCutoff1 *= 0.4f;
-				sendCutoff2 *= 0.4f;
-				sendCutoff3 *= 0.4f;
-			}
-
-			setEnvironment(sourceID, sendGain0, sendGain1, sendGain2, sendGain3, sendCutoff0, sendCutoff1, sendCutoff2,
-					sendCutoff3, directCutoff, directGain, airAbsorptionFactor);
+			efxPipeline.apply(sourceID, computeEnvironment(mc.theWorld, playerPos, soundPos, isRain));
 		} catch (Exception e) {
 			logError("Error while evaluation environment:");
 			e.printStackTrace();
-			setEnvironment(sourceID, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f);
+			efxPipeline.apply(sourceID, SoundEnvironment.passthrough());
 		}
 	}
 
-	private static void setEnvironment(final int sourceID, final float sendGain0, final float sendGain1,
-			final float sendGain2, final float sendGain3, final float sendCutoff0, final float sendCutoff1,
-			final float sendCutoff2, final float sendCutoff3, final float directCutoff, final float directGain,
-			final float airAbsorptionFactor) {
-		// Set reverb send filter values and set source to send to all reverb fx
-		// slots
-		EFX10.alFilterf(sendFilter0, EFX10.AL_LOWPASS_GAIN, sendGain0);
-		EFX10.alFilterf(sendFilter0, EFX10.AL_LOWPASS_GAINHF, sendCutoff0);
-		AL11.alSource3i(sourceID, EFX10.AL_AUXILIARY_SEND_FILTER, auxFXSlot0, 0, sendFilter0);
+	// Core environment compute: pure with respect to AL (no AL10/AL11/EFX10
+	// calls); world raycasts and Config reads only. This is the method a
+	// later voice path can call with a speaker position instead of a
+	// sound-event position.
+	private static SoundEnvironment computeEnvironment(final World world, final Vec3 playerPos, final Vec3 soundPos, final boolean isRain) {
+		final float absorptionCoeff = Config.globalBlockAbsorption * 3.0f;
+		final Vec3 normalToPlayer = playerPos.subtract(soundPos).normalize();
 
-		EFX10.alFilterf(sendFilter1, EFX10.AL_LOWPASS_GAIN, sendGain1);
-		EFX10.alFilterf(sendFilter1, EFX10.AL_LOWPASS_GAINHF, sendCutoff1);
-		AL11.alSource3i(sourceID, EFX10.AL_AUXILIARY_SEND_FILTER, auxFXSlot1, 1, sendFilter1);
+		final float airAbsorptionFactor = computeAirAbsorptionFactor(world, playerPos, soundPos);
+		final float occlusionAccumulation = traceDirectOcclusion(world, playerPos, soundPos, normalToPlayer);
 
-		EFX10.alFilterf(sendFilter2, EFX10.AL_LOWPASS_GAIN, sendGain2);
-		EFX10.alFilterf(sendFilter2, EFX10.AL_LOWPASS_GAINHF, sendCutoff2);
-		AL11.alSource3i(sourceID, EFX10.AL_AUXILIARY_SEND_FILTER, auxFXSlot2, 2, sendFilter2);
+		float directCutoff = (float) Math.exp(-occlusionAccumulation * absorptionCoeff);
+		final float directGain = (float) Math.pow(directCutoff, 0.1);
 
-		EFX10.alFilterf(sendFilter3, EFX10.AL_LOWPASS_GAIN, sendGain3);
-		EFX10.alFilterf(sendFilter3, EFX10.AL_LOWPASS_GAINHF, sendCutoff3);
-		AL11.alSource3i(sourceID, EFX10.AL_AUXILIARY_SEND_FILTER, auxFXSlot3, 3, sendFilter3);
+		if (mc.thePlayer.isInsideOfMaterial(Material.water)) {
+			directCutoff *= 1.0f - Config.underwaterFilter;
+		}
 
-		EFX10.alFilterf(directFilter0, EFX10.AL_LOWPASS_GAIN, directGain);
-		EFX10.alFilterf(directFilter0, EFX10.AL_LOWPASS_GAINHF, directCutoff);
-		AL10.alSourcei(sourceID, EFX10.AL_DIRECT_FILTER, directFilter0);
+		if (isRain) {
+			return new SoundEnvironment(0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 1.0f, 1.0f, 1.0f,
+					directCutoff, directGain, airAbsorptionFactor);
+		}
 
-		AL10.alSourcef(sourceID, EFX10.AL_AIR_ABSORPTION_FACTOR, MathHelper.clamp_float(Config.airAbsorption * airAbsorptionFactor,0.0f,10.0f));
+		final int numRays = Config.environmentEvaluationRays;
+		final int rayBounces = Config.environmentEvaluationRaysBounces;
+
+		final ReverbRays rays = castReverbRays(world, playerPos, soundPos, numRays, rayBounces);
+		return shapeEnvironment(rays, occlusionAccumulation, absorptionCoeff, directCutoff, airAbsorptionFactor,
+				numRays, rayBounces);
 	}
 
-	/**
-	 * Applies the parameters in the enum ReverbParams to the main reverb
-	 * effect.
-	 */
-	protected static void setReverbParams(final ReverbParams r, final int auxFXSlot, final int reverbSlot) {
-		EFX10.alEffectf(reverbSlot, EFX10.AL_EAXREVERB_DENSITY, r.density);
-		checkErrorLog("Error while assigning reverb density: " + r.density);
+	// Snow dampens sounds: rate how snowed-in the player, the sound and the
+	// point between them are, and raise the air absorption accordingly.
+	private static float computeAirAbsorptionFactor(final World world, final Vec3 playerPos, final Vec3 soundPos) {
+		if (!world.isRaining()) return 1.0f;
 
-		EFX10.alEffectf(reverbSlot, EFX10.AL_EAXREVERB_DIFFUSION, r.diffusion);
-		checkErrorLog("Error while assigning reverb diffusion: " + r.diffusion);
+		final Vec3 middlePos = playerPos.addVector(soundPos.xCoord, soundPos.yCoord, soundPos.zCoord);
+		middlePos.xCoord = middlePos.xCoord*0.5d;
+		middlePos.yCoord = middlePos.yCoord*0.5d;
+		middlePos.zCoord = middlePos.zCoord*0.5d;
 
-		EFX10.alEffectf(reverbSlot, EFX10.AL_EAXREVERB_GAIN, r.gain);
-		checkErrorLog("Error while assigning reverb gain: " + r.gain);
+		final int snowingPlayer = isSnowingAt(world, playerPos, false);
+		final int snowingSound = isSnowingAt(world, soundPos, false);
+		final int snowingMiddle = isSnowingAt(world, middlePos, false);
+		final float snowFactor = snowingPlayer * 0.25f + snowingMiddle * 0.5f + snowingSound * 0.25f;
 
-		EFX10.alEffectf(reverbSlot, EFX10.AL_EAXREVERB_GAINHF, r.gainHF);
-		checkErrorLog("Error while assigning reverb gainHF: " + r.gainHF);
+		if (snowFactor <= 0.0f) return 1.0f;
+		return Math.max(Config.snowAirAbsorptionFactor*world.getRainStrength(1.0f)*snowFactor, 1.0f);
+	}
 
-		EFX10.alEffectf(reverbSlot, EFX10.AL_EAXREVERB_DECAY_TIME, r.decayTime);
-		checkErrorLog("Error while assigning reverb decayTime: " + r.decayTime);
+	// Direct path occlusion: march up to 10 ray segments from the sound
+	// towards the player, accumulating occlusion for every block hit.
+	private static float traceDirectOcclusion(final World world, final Vec3 playerPos, final Vec3 soundPos, final Vec3 normalToPlayer) {
+		Vec3 rayOrigin = soundPos;
 
-		EFX10.alEffectf(reverbSlot, EFX10.AL_EAXREVERB_DECAY_HFRATIO, r.decayHFRatio);
-		checkErrorLog("Error while assigning reverb decayHFRatio: " + r.decayHFRatio);
+		float occlusionAccumulation = 0.0f;
 
-		EFX10.alEffectf(reverbSlot, EFX10.AL_EAXREVERB_REFLECTIONS_GAIN, r.reflectionsGain);
-		checkErrorLog("Error while assigning reverb reflectionsGain: " + r.reflectionsGain);
+		for (int i = 0; i < 10; i++) {
+			final MovingObjectPosition rayHit = world.rayTraceBlocks(rayOrigin, playerPos, true);
+			if (rayHit == null) break;
 
-		EFX10.alEffectf(reverbSlot, EFX10.AL_EAXREVERB_LATE_REVERB_GAIN, r.lateReverbGain);
-		checkErrorLog("Error while assigning reverb lateReverbGain: " + r.lateReverbGain);
+			final Block blockHit = world.getBlock(rayHit.blockX,rayHit.blockY,rayHit.blockZ);
 
-		EFX10.alEffectf(reverbSlot, EFX10.AL_EAXREVERB_LATE_REVERB_DELAY, r.lateReverbDelay);
-		checkErrorLog("Error while assigning reverb lateReverbDelay: " + r.lateReverbDelay);
+			float blockOcclusion = 1.0f;
 
-		EFX10.alEffectf(reverbSlot, EFX10.AL_EAXREVERB_AIR_ABSORPTION_GAINHF, r.airAbsorptionGainHF);
-		checkErrorLog("Error while assigning reverb airAbsorptionGainHF: " + r.airAbsorptionGainHF);
+			if (!blockHit.isOpaqueCube()) {
+				// log("not a solid block!");
+				blockOcclusion *= 0.15f;
+			}
 
-		EFX10.alEffectf(reverbSlot, EFX10.AL_EAXREVERB_ROOM_ROLLOFF_FACTOR, r.roomRolloffFactor);
-		checkErrorLog("Error while assigning reverb roomRolloffFactor: " + r.roomRolloffFactor);
+			occlusionAccumulation += blockOcclusion;
 
-		// Attach updated effect object
-		EFX10.alAuxiliaryEffectSloti(auxFXSlot, EFX10.AL_EFFECTSLOT_EFFECT, reverbSlot);
+			rayOrigin = Vec3.createVectorHelper(rayHit.hitVec.xCoord + normalToPlayer.xCoord * 0.1, rayHit.hitVec.yCoord + normalToPlayer.yCoord * 0.1,
+					rayHit.hitVec.zCoord + normalToPlayer.zCoord * 0.1);
+		}
+
+		return occlusionAccumulation;
+	}
+
+	// Accumulated raw output of the reverb ray cast, before shaping.
+	private static class ReverbRays {
+		float sendGain0;
+		float sendGain1;
+		float sendGain2;
+		float sendGain3;
+		float sharedAirspace;
+		final float[] bounceReflectivityRatio;
+
+		ReverbRays(final int rayBounces) {
+			bounceReflectivityRatio = new float[rayBounces];
+		}
+
+		// Crossfade the reflection energy of one bounce into the four reverb
+		// sends by its delay.
+		void accumulateSend(final float totalRayDistance, final float energyTowardsPlayer, final float blockReflectivity, final float rcpTotalRays) {
+			final float reflectionDelay = (float) Math.max(totalRayDistance, 0.0) * 0.12f * blockReflectivity;
+
+			final float cross0 = 1.0f - MathHelper.clamp_float(Math.abs(reflectionDelay - 0.0f), 0.0f, 1.0f);
+			final float cross1 = 1.0f - MathHelper.clamp_float(Math.abs(reflectionDelay - 1.0f), 0.0f, 1.0f);
+			final float cross2 = 1.0f - MathHelper.clamp_float(Math.abs(reflectionDelay - 2.0f), 0.0f, 1.0f);
+			final float cross3 = MathHelper.clamp_float(reflectionDelay - 2.0f, 0.0f, 1.0f);
+
+			sendGain0 += cross0 * energyTowardsPlayer * 6.4f * rcpTotalRays;
+			sendGain1 += cross1 * energyTowardsPlayer * 12.8f * rcpTotalRays;
+			sendGain2 += cross2 * energyTowardsPlayer * 12.8f * rcpTotalRays;
+			sendGain3 += cross3 * energyTowardsPlayer * 12.8f * rcpTotalRays;
+		}
+	}
+
+	// Shoot rays around the sound on a golden-angle sphere and bounce each
+	// hit to estimate reverb energy and shared airspace.
+	private static ReverbRays castReverbRays(final World world, final Vec3 playerPos, final Vec3 soundPos, final int numRays, final int rayBounces) {
+		final float phi = 1.618033988f;
+		final float gAngle = phi * (float) Math.PI * 2.0f;
+		final float maxDistance = 256.0f;
+
+		final float rcpTotalRays = 1.0f / (numRays * rayBounces);
+
+		final ReverbRays result = new ReverbRays(rayBounces);
+
+		for (int i = 0; i < numRays; i++) {
+			final float fiN = (float) i / numRays;
+			final float longitude = gAngle * (float) i;
+			final float latitude = (float) Math.asin(fiN * 2.0f - 1.0f);
+
+			final Vec3 rayDir = Vec3.createVectorHelper(Math.cos(latitude) * Math.cos(longitude),
+					Math.cos(latitude) * Math.sin(longitude), Math.sin(latitude));
+
+			final Vec3 rayStart = Vec3.createVectorHelper(soundPos.xCoord, soundPos.yCoord, soundPos.zCoord);
+
+			final Vec3 rayEnd = Vec3.createVectorHelper(rayStart.xCoord + rayDir.xCoord * maxDistance, rayStart.yCoord + rayDir.yCoord * maxDistance,
+					rayStart.zCoord + rayDir.zCoord * maxDistance);
+
+			final MovingObjectPosition rayHit = world.rayTraceBlocks(rayStart, rayEnd, true);
+			if (rayHit == null) continue;
+
+			castBounces(world, playerPos, soundPos, rayDir, rayHit, rayBounces, maxDistance, rcpTotalRays, result);
+		}
+
+		return result;
+	}
+
+	// Secondary ray bounces for one primary hit, accumulating into result.
+	private static void castBounces(final World world, final Vec3 playerPos, final Vec3 soundPos, final Vec3 rayDir,
+			final MovingObjectPosition rayHit, final int rayBounces, final float maxDistance, final float rcpTotalRays,
+			final ReverbRays result) {
+		final double rayLength = soundPos.distanceTo(rayHit.hitVec);
+
+		Block lastHitBlock = world.getBlock(rayHit.blockX,rayHit.blockY,rayHit.blockZ);
+		Vec3 lastHitPos = rayHit.hitVec;
+		Vec3 lastHitNormal = getNormalFromFacing(rayHit.sideHit);
+		Vec3 lastRayDir = rayDir;
+
+		float totalRayDistance = (float) rayLength;
+
+		for (int j = 0; j < rayBounces; j++) {
+			final Vec3 newRayDir = reflect(lastRayDir, lastHitNormal);
+			final Vec3 newRayStart = Vec3.createVectorHelper(lastHitPos.xCoord + lastHitNormal.xCoord * 0.01,
+					lastHitPos.yCoord + lastHitNormal.yCoord * 0.01, lastHitPos.zCoord + lastHitNormal.zCoord * 0.01);
+			final Vec3 newRayEnd = Vec3.createVectorHelper(newRayStart.xCoord + newRayDir.xCoord * maxDistance,
+					newRayStart.yCoord + newRayDir.yCoord * maxDistance, newRayStart.zCoord + newRayDir.zCoord * maxDistance);
+
+			final MovingObjectPosition newRayHit = world.rayTraceBlocks(newRayStart, newRayEnd, true);
+
+			float energyTowardsPlayer = 0.25f;
+			final float blockReflectivity = getBlockReflectivity(lastHitBlock);
+			energyTowardsPlayer *= blockReflectivity * 0.75f + 0.25f;
+
+			// Nowhere to bounce off of, stop bouncing!
+			if (newRayHit == null) {
+				totalRayDistance += lastHitPos.distanceTo(playerPos);
+				result.accumulateSend(totalRayDistance, energyTowardsPlayer, blockReflectivity, rcpTotalRays);
+				break;
+			}
+
+			final double newRayLength = lastHitPos.distanceTo(newRayHit.hitVec);
+
+			result.bounceReflectivityRatio[j] += blockReflectivity;
+
+			totalRayDistance += newRayLength;
+
+			lastHitPos = newRayHit.hitVec;
+			lastHitNormal = getNormalFromFacing(newRayHit.sideHit);
+			lastRayDir = newRayDir;
+			lastHitBlock = world.getBlock(newRayHit.blockX,newRayHit.blockY,newRayHit.blockZ);
+
+			// Cast one final ray towards the player. If it's
+			// unobstructed, then the sound source and the player
+			// share airspace.
+			if (!Config.simplerSharedAirspaceSimulation || j == rayBounces - 1) {
+				final Vec3 finalRayStart = Vec3.createVectorHelper(lastHitPos.xCoord + lastHitNormal.xCoord * 0.01,
+						lastHitPos.yCoord + lastHitNormal.yCoord * 0.01, lastHitPos.zCoord + lastHitNormal.zCoord * 0.01);
+
+				final MovingObjectPosition finalRayHit = world.rayTraceBlocks(finalRayStart, playerPos, true);
+
+				if (finalRayHit == null) {
+					// log("Secondary ray hit the player!");
+					result.sharedAirspace += 1.0f;
+				}
+			}
+
+			result.accumulateSend(totalRayDistance, energyTowardsPlayer, blockReflectivity, rcpTotalRays);
+		}
+	}
+
+	// Final send gain/cutoff shaping: normalize the ray results, blend in
+	// shared airspace and fold everything into a SoundEnvironment.
+	private static SoundEnvironment shapeEnvironment(final ReverbRays rays, final float occlusionAccumulation,
+			final float absorptionCoeff, final float directCutoffIn, final float airAbsorptionFactor,
+			final int numRays, final int rayBounces) {
+		final float rcpTotalRays = 1.0f / (numRays * rayBounces);
+		final float rcpPrimaryRays = 1.0f / numRays;
+
+		final float[] bounceReflectivityRatio = rays.bounceReflectivityRatio;
+
+		// Pre-existing behavior kept as-is: indices [0..3] are hardcoded even
+		// though the array is sized by Config.environmentEvaluationRaysBounces
+		// (latent crash if that config is ever < 4).
+		bounceReflectivityRatio[0] = bounceReflectivityRatio[0] / numRays;
+		bounceReflectivityRatio[1] = bounceReflectivityRatio[1] / numRays;
+		bounceReflectivityRatio[2] = bounceReflectivityRatio[2] / numRays;
+		bounceReflectivityRatio[3] = bounceReflectivityRatio[3] / numRays;
+
+		float sharedAirspace = rays.sharedAirspace;
+
+		sharedAirspace *= 64.0f;
+
+		if (Config.simplerSharedAirspaceSimulation) {
+			sharedAirspace *= rcpPrimaryRays;
+		} else {
+			sharedAirspace *= rcpTotalRays;
+		}
+
+		final float sharedAirspaceWeight0 = MathHelper.clamp_float(sharedAirspace / 20.0f, 0.0f, 1.0f);
+		final float sharedAirspaceWeight1 = MathHelper.clamp_float(sharedAirspace / 15.0f, 0.0f, 1.0f);
+		final float sharedAirspaceWeight2 = MathHelper.clamp_float(sharedAirspace / 10.0f, 0.0f, 1.0f);
+		final float sharedAirspaceWeight3 = MathHelper.clamp_float(sharedAirspace / 10.0f, 0.0f, 1.0f);
+
+		float sendCutoff0 = (float) Math.exp(-occlusionAccumulation * absorptionCoeff * 1.0f) * (1.0f - sharedAirspaceWeight0)
+				+ sharedAirspaceWeight0;
+		float sendCutoff1 = (float) Math.exp(-occlusionAccumulation * absorptionCoeff * 1.0f) * (1.0f - sharedAirspaceWeight1)
+				+ sharedAirspaceWeight1;
+		float sendCutoff2 = (float) Math.exp(-occlusionAccumulation * absorptionCoeff * 1.5f) * (1.0f - sharedAirspaceWeight2)
+				+ sharedAirspaceWeight2;
+		float sendCutoff3 = (float) Math.exp(-occlusionAccumulation * absorptionCoeff * 1.5f) * (1.0f - sharedAirspaceWeight3)
+				+ sharedAirspaceWeight3;
+
+		// attempt to preserve directionality when airspace is shared by
+		// allowing some of the dry signal through but filtered
+		final float averageSharedAirspace = (sharedAirspaceWeight0 + sharedAirspaceWeight1 + sharedAirspaceWeight2
+				+ sharedAirspaceWeight3) * 0.25f;
+		final float directCutoff = Math.max((float) Math.pow(averageSharedAirspace, 0.5) * 0.2f, directCutoffIn);
+
+		final float directGain = (float) Math.pow(directCutoff, 0.1);
+
+		float sendGain0 = rays.sendGain0;
+		float sendGain1 = rays.sendGain1;
+		float sendGain2 = rays.sendGain2;
+		float sendGain3 = rays.sendGain3;
+
+		sendGain1 *= bounceReflectivityRatio[1];
+		sendGain2 *= (float) Math.pow(bounceReflectivityRatio[2], 3.0);
+		sendGain3 *= (float) Math.pow(bounceReflectivityRatio[3], 4.0);
+
+		sendGain0 = MathHelper.clamp_float(sendGain0, 0.0f, 1.0f);
+		sendGain1 = MathHelper.clamp_float(sendGain1, 0.0f, 1.0f);
+		sendGain2 = MathHelper.clamp_float(sendGain2 * 1.05f - 0.05f, 0.0f, 1.0f);
+		sendGain3 = MathHelper.clamp_float(sendGain3 * 1.05f - 0.05f, 0.0f, 1.0f);
+
+		sendGain0 *= (float) Math.pow(sendCutoff0, 0.1);
+		sendGain1 *= (float) Math.pow(sendCutoff1, 0.1);
+		sendGain2 *= (float) Math.pow(sendCutoff2, 0.1);
+		sendGain3 *= (float) Math.pow(sendCutoff3, 0.1);
+
+		if (mc.thePlayer.isInWater()) {
+			sendCutoff0 *= 0.4f;
+			sendCutoff1 *= 0.4f;
+			sendCutoff2 *= 0.4f;
+			sendCutoff3 *= 0.4f;
+		}
+
+		return new SoundEnvironment(sendGain0, sendGain1, sendGain2, sendGain3, sendCutoff0, sendCutoff1, sendCutoff2,
+				sendCutoff3, directCutoff, directGain, airAbsorptionFactor);
 	}
 
 	public static void log(final String message) {
