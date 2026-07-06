@@ -1,12 +1,11 @@
 package com.sonicether.soundphysics;
 
+import me.eigenraven.lwjgl3ify.api.Lwjgl3Aware;
 import net.minecraft.util.MathHelper;
 import org.lwjgl.openal.AL10;
 import org.lwjgl.openal.AL11;
 import org.lwjgl.openal.ALC10;
-import org.lwjgl.openal.ALCcontext;
-import org.lwjgl.openal.ALCdevice;
-import org.lwjgl.openal.EFX10;
+import org.lwjgl.openal.EXTEfx;
 
 /**
  * Owns the OpenAL EFX objects (auxiliary effect slots, EAXREVERB effects and
@@ -15,6 +14,7 @@ import org.lwjgl.openal.EFX10;
  * can later serve another source path (e.g. voice chat) without touching the
  * Minecraft/paulscode one.
  */
+@Lwjgl3Aware
 public class EfxPipeline {
 
 	private int auxFXSlot0;
@@ -38,8 +38,8 @@ public class EfxPipeline {
 	 */
 	public EfxPipeline init() {
 		// Get current context and device
-		final ALCcontext currentContext = ALC10.alcGetCurrentContext();
-		final ALCdevice currentDevice = ALC10.alcGetContextsDevice(currentContext);
+		final long currentContext = ALC10.alcGetCurrentContext();
+		final long currentDevice = ALC10.alcGetContextsDevice(currentContext);
 
 		if (!ALC10.alcIsExtensionPresent(currentDevice, "ALC_EXT_EFX")) {
 			SoundPhysics.logError("EFX Extension not found on current device. Aborting.");
@@ -99,39 +99,39 @@ public class EfxPipeline {
 		routeSend(sourceID, 2, auxFXSlot2, sendFilter2, env.sendGain2, env.sendCutoff2);
 		routeSend(sourceID, 3, auxFXSlot3, sendFilter3, env.sendGain3, env.sendCutoff3);
 
-		EFX10.alFilterf(directFilter0, EFX10.AL_LOWPASS_GAIN, env.directGain);
-		EFX10.alFilterf(directFilter0, EFX10.AL_LOWPASS_GAINHF, env.directCutoff);
-		AL10.alSourcei(sourceID, EFX10.AL_DIRECT_FILTER, directFilter0);
+		EXTEfx.alFilterf(directFilter0, EXTEfx.AL_LOWPASS_GAIN, env.directGain);
+		EXTEfx.alFilterf(directFilter0, EXTEfx.AL_LOWPASS_GAINHF, env.directCutoff);
+		AL10.alSourcei(sourceID, EXTEfx.AL_DIRECT_FILTER, directFilter0);
 
-		AL10.alSourcef(sourceID, EFX10.AL_AIR_ABSORPTION_FACTOR,
+		AL10.alSourcef(sourceID, EXTEfx.AL_AIR_ABSORPTION_FACTOR,
 				MathHelper.clamp_float(Config.airAbsorption * env.airAbsorptionFactor, 0.0f, 10.0f));
 	}
 
 	private static int genAuxSlot() {
-		final int slot = EFX10.alGenAuxiliaryEffectSlots();
+		final int slot = EXTEfx.alGenAuxiliaryEffectSlots();
 		SoundPhysics.log("Aux slot " + slot + " created");
-		EFX10.alAuxiliaryEffectSloti(slot, EFX10.AL_EFFECTSLOT_AUXILIARY_SEND_AUTO, AL10.AL_TRUE);
+		EXTEfx.alAuxiliaryEffectSloti(slot, EXTEfx.AL_EFFECTSLOT_AUXILIARY_SEND_AUTO, AL10.AL_TRUE);
 		return slot;
 	}
 
 	private static int genReverbEffect(final int index) {
-		final int effect = EFX10.alGenEffects();
-		EFX10.alEffecti(effect, EFX10.AL_EFFECT_TYPE, EFX10.AL_EFFECT_EAXREVERB);
+		final int effect = EXTEfx.alGenEffects();
+		EXTEfx.alEffecti(effect, EXTEfx.AL_EFFECT_TYPE, EXTEfx.AL_EFFECT_EAXREVERB);
 		SoundPhysics.checkErrorLog("Failed creating reverb effect slot " + index + "!");
 		return effect;
 	}
 
 	private static int genLowpassFilter() {
-		final int filter = EFX10.alGenFilters();
-		EFX10.alFilteri(filter, EFX10.AL_FILTER_TYPE, EFX10.AL_FILTER_LOWPASS);
+		final int filter = EXTEfx.alGenFilters();
+		EXTEfx.alFilteri(filter, EXTEfx.AL_FILTER_TYPE, EXTEfx.AL_FILTER_LOWPASS);
 		return filter;
 	}
 
 	private static void routeSend(final int sourceID, final int send, final int auxFXSlot, final int sendFilter,
 			final float sendGain, final float sendCutoff) {
-		EFX10.alFilterf(sendFilter, EFX10.AL_LOWPASS_GAIN, sendGain);
-		EFX10.alFilterf(sendFilter, EFX10.AL_LOWPASS_GAINHF, sendCutoff);
-		AL11.alSource3i(sourceID, EFX10.AL_AUXILIARY_SEND_FILTER, auxFXSlot, send, sendFilter);
+		EXTEfx.alFilterf(sendFilter, EXTEfx.AL_LOWPASS_GAIN, sendGain);
+		EXTEfx.alFilterf(sendFilter, EXTEfx.AL_LOWPASS_GAINHF, sendCutoff);
+		AL11.alSource3i(sourceID, EXTEfx.AL_AUXILIARY_SEND_FILTER, auxFXSlot, send, sendFilter);
 	}
 
 	/**
@@ -139,41 +139,41 @@ public class EfxPipeline {
 	 * effect and attaches it to its effect slot.
 	 */
 	private EfxPipeline setReverbParams(final ReverbParams r, final int auxFXSlot, final int reverbSlot) {
-		EFX10.alEffectf(reverbSlot, EFX10.AL_EAXREVERB_DENSITY, r.density);
+		EXTEfx.alEffectf(reverbSlot, EXTEfx.AL_EAXREVERB_DENSITY, r.density);
 		SoundPhysics.checkErrorLog("Error while assigning reverb density: " + r.density);
 
-		EFX10.alEffectf(reverbSlot, EFX10.AL_EAXREVERB_DIFFUSION, r.diffusion);
+		EXTEfx.alEffectf(reverbSlot, EXTEfx.AL_EAXREVERB_DIFFUSION, r.diffusion);
 		SoundPhysics.checkErrorLog("Error while assigning reverb diffusion: " + r.diffusion);
 
-		EFX10.alEffectf(reverbSlot, EFX10.AL_EAXREVERB_GAIN, r.gain);
+		EXTEfx.alEffectf(reverbSlot, EXTEfx.AL_EAXREVERB_GAIN, r.gain);
 		SoundPhysics.checkErrorLog("Error while assigning reverb gain: " + r.gain);
 
-		EFX10.alEffectf(reverbSlot, EFX10.AL_EAXREVERB_GAINHF, r.gainHF);
+		EXTEfx.alEffectf(reverbSlot, EXTEfx.AL_EAXREVERB_GAINHF, r.gainHF);
 		SoundPhysics.checkErrorLog("Error while assigning reverb gainHF: " + r.gainHF);
 
-		EFX10.alEffectf(reverbSlot, EFX10.AL_EAXREVERB_DECAY_TIME, r.decayTime);
+		EXTEfx.alEffectf(reverbSlot, EXTEfx.AL_EAXREVERB_DECAY_TIME, r.decayTime);
 		SoundPhysics.checkErrorLog("Error while assigning reverb decayTime: " + r.decayTime);
 
-		EFX10.alEffectf(reverbSlot, EFX10.AL_EAXREVERB_DECAY_HFRATIO, r.decayHFRatio);
+		EXTEfx.alEffectf(reverbSlot, EXTEfx.AL_EAXREVERB_DECAY_HFRATIO, r.decayHFRatio);
 		SoundPhysics.checkErrorLog("Error while assigning reverb decayHFRatio: " + r.decayHFRatio);
 
-		EFX10.alEffectf(reverbSlot, EFX10.AL_EAXREVERB_REFLECTIONS_GAIN, r.reflectionsGain);
+		EXTEfx.alEffectf(reverbSlot, EXTEfx.AL_EAXREVERB_REFLECTIONS_GAIN, r.reflectionsGain);
 		SoundPhysics.checkErrorLog("Error while assigning reverb reflectionsGain: " + r.reflectionsGain);
 
-		EFX10.alEffectf(reverbSlot, EFX10.AL_EAXREVERB_LATE_REVERB_GAIN, r.lateReverbGain);
+		EXTEfx.alEffectf(reverbSlot, EXTEfx.AL_EAXREVERB_LATE_REVERB_GAIN, r.lateReverbGain);
 		SoundPhysics.checkErrorLog("Error while assigning reverb lateReverbGain: " + r.lateReverbGain);
 
-		EFX10.alEffectf(reverbSlot, EFX10.AL_EAXREVERB_LATE_REVERB_DELAY, r.lateReverbDelay);
+		EXTEfx.alEffectf(reverbSlot, EXTEfx.AL_EAXREVERB_LATE_REVERB_DELAY, r.lateReverbDelay);
 		SoundPhysics.checkErrorLog("Error while assigning reverb lateReverbDelay: " + r.lateReverbDelay);
 
-		EFX10.alEffectf(reverbSlot, EFX10.AL_EAXREVERB_AIR_ABSORPTION_GAINHF, r.airAbsorptionGainHF);
+		EXTEfx.alEffectf(reverbSlot, EXTEfx.AL_EAXREVERB_AIR_ABSORPTION_GAINHF, r.airAbsorptionGainHF);
 		SoundPhysics.checkErrorLog("Error while assigning reverb airAbsorptionGainHF: " + r.airAbsorptionGainHF);
 
-		EFX10.alEffectf(reverbSlot, EFX10.AL_EAXREVERB_ROOM_ROLLOFF_FACTOR, r.roomRolloffFactor);
+		EXTEfx.alEffectf(reverbSlot, EXTEfx.AL_EAXREVERB_ROOM_ROLLOFF_FACTOR, r.roomRolloffFactor);
 		SoundPhysics.checkErrorLog("Error while assigning reverb roomRolloffFactor: " + r.roomRolloffFactor);
 
 		// Attach updated effect object
-		EFX10.alAuxiliaryEffectSloti(auxFXSlot, EFX10.AL_EFFECTSLOT_EFFECT, reverbSlot);
+		EXTEfx.alAuxiliaryEffectSloti(auxFXSlot, EXTEfx.AL_EFFECTSLOT_EFFECT, reverbSlot);
 		return this;
 	}
 }

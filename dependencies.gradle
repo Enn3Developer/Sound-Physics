@@ -34,4 +34,16 @@
  * For more details, see https://docs.gradle.org/8.0.1/userguide/java_library_plugin.html#sec:java_library_configurations_graph
  */
 dependencies {
+    // Compile-time access to lwjgl3ify's API (@Lwjgl3Aware) for Java 17-25 / LWJGL3 runtime support, not
+    // published as a dependency of this mod. Deliberately not runtimeOnlyNonPublishable: that adds
+    // lwjgl3ify's relauncher tweaker to both runClient and runServer, but the relauncher does not support
+    // server launches and crashes runServer.
+    compileOnly("com.github.GTNewHorizons:lwjgl3ify:3.0.25:dev")
+
+    // Compile-time-only access to the real LWJGL3 OpenAL (EXTEfx, long-handle ALC) API used by the EFX
+    // reverb/occlusion pipeline. Not runtimeOnlyNonPublishable: lwjgl3ify's own LWJGL3 provisioning already
+    // puts the actual runtime jars (matching version, with natives) on the runClient17/21/25 classpath;
+    // bundling our own here would risk duplicate/conflicting LWJGL3 classes, and (like lwjgl3ify above)
+    // must never reach runServer.
+    compileOnly("org.lwjgl:lwjgl-openal:3.3.3")
 }

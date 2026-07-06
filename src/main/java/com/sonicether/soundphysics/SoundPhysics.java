@@ -5,6 +5,7 @@ import cpw.mods.fml.common.Mod;
 import cpw.mods.fml.common.event.FMLInitializationEvent;
 import cpw.mods.fml.common.event.FMLPreInitializationEvent;
 import cpw.mods.fml.common.eventhandler.SubscribeEvent;
+import me.eigenraven.lwjgl3ify.api.Lwjgl3Aware;
 import net.minecraft.block.Block;
 import net.minecraft.block.material.Material;
 import net.minecraft.client.Minecraft;
@@ -33,6 +34,9 @@ import java.util.regex.Pattern;
 
 @Mod(modid = SoundPhysics.modid, name = SoundPhysics.modName, acceptedMinecraftVersions = SoundPhysics.mcVersion, version = SoundPhysics.version, guiFactory = "com.sonicether.soundphysics.SPGuiFactory",
 	dependencies="before:computronics;required-after:gtnhmixins@[2.0.0,)") // Dependencies to make sure that SP's config is loaded before patching Computronics
+// Escape lwjgl3ify's org.lwjgl -> org.lwjglx redirect: this class calls the real LWJGL3 AL API directly.
+// The annotation is per class FILE, so the AL-touching nested classes below carry their own copies.
+@Lwjgl3Aware
 public class SoundPhysics {
 
 	public static final String modid = "@MODID@";
@@ -98,6 +102,7 @@ public class SoundPhysics {
 		setupThread();
 	}
 
+	@Lwjgl3Aware
 	public static class Source {
 		public int sourceID;
 		public float posX;
@@ -122,6 +127,7 @@ public class SoundPhysics {
 		}
 	}
 
+	@Lwjgl3Aware
 	public static class ProcThread extends Thread {
 		@Override
 		public synchronized void run() {
@@ -148,7 +154,7 @@ public class SoundPhysics {
 						//boolean finished = source.size == byteoff;
 						if (state == AL10.AL_PLAYING) {
 							FloatBuffer pos = BufferUtils.createFloatBuffer(3);
-							AL10.alGetSource(source.sourceID,AL10.AL_POSITION,pos);
+							AL10.alGetSourcefv(source.sourceID,AL10.AL_POSITION,pos);
 							source.posX = pos.get(0);
 							source.posY = pos.get(1);
 							source.posZ = pos.get(2);
