@@ -6,6 +6,9 @@ import org.lwjgl.openal.AL10;
 import org.lwjgl.openal.AL11;
 import org.lwjgl.openal.ALC10;
 import org.lwjgl.openal.EXTEfx;
+import org.lwjgl.system.MemoryStack;
+
+import java.nio.IntBuffer;
 
 /**
  * Owns the OpenAL EFX objects (auxiliary effect slots, EAXREVERB effects and
@@ -31,6 +34,12 @@ public class EfxPipeline {
 	private int sendFilter2;
 	private int sendFilter3;
 
+	// Number of reverb sends apply() actually routes, from index 0 up. The game
+	// path leaves this at the full 4; the voice path lowers it to however many
+	// auxiliary sends the voice context was granted (see limitSends). The direct
+	// filter and air absorption are unaffected — they always apply.
+	private int activeSends = 4;
+
 	/**
 	 * Game path: self-discovers the device from the process-current context and
 	 * initializes on it. Correct for the Minecraft/paulscode sound thread, which
@@ -40,7 +49,30 @@ public class EfxPipeline {
 	 * the voice one — pass that thread's real device to {@link #init(long)} instead.
 	 */
 	public EfxPipeline init() {
-		return init(ALC10.alcGetContextsDevice(ALC10.alcGetCurrentContext()));
+		final long deviceHandle = ALC10.alcGetContextsDevice(ALC10.alcGetCurrentContext());
+		init(deviceHandle);
+		// Diagnostic only: the game path always drives all four sends (activeSends
+		// stays 4). Logging the granted count tells us whether MC's own context
+		// even provisions four aux sends per source.
+		if (isInitialized()) {
+			SoundPhysics.log("Game context granted " + queryGrantedSends(deviceHandle) + " aux sends (of 4 driven).");
+		}
+		return this;
+	}
+
+	/**
+	 * Reads how many auxiliary sends per source the context on {@code deviceHandle}
+	 * actually granted ({@code ALC_MAX_AUXILIARY_SENDS}). A registrant only REQUESTS
+	 * a send count; the ALC implementation may grant fewer, so callers use this to
+	 * log and — on the voice path — to {@link #limitSends} accordingly. Uses a stack
+	 * buffer; must run with the target context current.
+	 */
+	public static int queryGrantedSends(final long deviceHandle) {
+		try (MemoryStack stack = MemoryStack.stackPush()) {
+			final IntBuffer buf = stack.mallocInt(1);
+			ALC10.alcGetIntegerv(deviceHandle, EXTEfx.ALC_MAX_AUXILIARY_SENDS, buf);
+			return buf.get(0);
+		}
 	}
 
 	/**
@@ -85,6 +117,18 @@ public class EfxPipeline {
 	}
 
 	/**
+	 * Caps the number of reverb sends {@link #apply} routes to indices {@code [0, n)}.
+	 * The ALC implementation may grant fewer auxiliary sends per source than the
+	 * four this pipeline drives; routing a send the source has no slot for raises
+	 * {@code AL_INVALID_VALUE}. Clamped to {@code [0, 4]}. Fluent so it drops into
+	 * the {@code init(...).limitSends(n).applyReverbPresets()} setup chain.
+	 */
+	public EfxPipeline limitSends(final int n) {
+		activeSends = Math.max(0, Math.min(4, n));
+		return this;
+	}
+
+	/**
 	 * Applies the ReverbParams presets to the four reverb effects and attaches
 	 * them to their effect slots. No-op while uninitialized.
 	 */
@@ -102,12 +146,13 @@ public class EfxPipeline {
 	 * absorption factor.
 	 */
 	public void apply(final int sourceID, final SoundEnvironment env) {
-		// Set reverb send filter values and set source to send to all reverb fx
-		// slots
-		routeSend(sourceID, 0, auxFXSlot0, sendFilter0, env.sendGain0, env.sendCutoff0);
-		routeSend(sourceID, 1, auxFXSlot1, sendFilter1, env.sendGain1, env.sendCutoff1);
-		routeSend(sourceID, 2, auxFXSlot2, sendFilter2, env.sendGain2, env.sendCutoff2);
-		routeSend(sourceID, 3, auxFXSlot3, sendFilter3, env.sendGain3, env.sendCutoff3);
+		// Set reverb send filter values and route the source to each reverb fx slot,
+		// but only for sends the context actually granted (activeSends). The direct
+		// filter and air absorption below always apply.
+		if (activeSends > 0) routeSend(sourceID, 0, auxFXSlot0, sendFilter0, env.sendGain0, env.sendCutoff0);
+		if (activeSends > 1) routeSend(sourceID, 1, auxFXSlot1, sendFilter1, env.sendGain1, env.sendCutoff1);
+		if (activeSends > 2) routeSend(sourceID, 2, auxFXSlot2, sendFilter2, env.sendGain2, env.sendCutoff2);
+		if (activeSends > 3) routeSend(sourceID, 3, auxFXSlot3, sendFilter3, env.sendGain3, env.sendCutoff3);
 
 		EXTEfx.alFilterf(directFilter0, EXTEfx.AL_LOWPASS_GAIN, env.directGain);
 		EXTEfx.alFilterf(directFilter0, EXTEfx.AL_LOWPASS_GAINHF, env.directCutoff);

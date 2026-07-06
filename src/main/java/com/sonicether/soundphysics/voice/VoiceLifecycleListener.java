@@ -13,14 +13,17 @@ import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * gtnh-voice lifecycle listener that owns one {@link EfxPipeline} per voice AL
- * context and applies occlusion to voice sources. Every callback runs on the
- * voice audio thread with the voice context current, so direct AL calls are
+ * context and applies reverb + occlusion to voice sources. Every callback runs on
+ * the voice audio thread with the voice context current, so direct AL calls are
  * allowed here — hence {@code @Lwjgl3Aware} (this class touches {@code ALC10}).
  *
- * <p>Occlusion only: the pipeline is created with {@link EfxPipeline#init(long)}
- * and {@code applyReverbPresets()} is deliberately NOT called, so the aux slots
- * keep {@code AL_EFFECT_NULL} and the neutral sends in the occlusion-only
- * {@link SoundEnvironment} stay inert.
+ * <p>Reverb enabled: {@code contextCreated} queries how many auxiliary sends the
+ * voice context actually granted ({@code ALC_MAX_AUXILIARY_SENDS} — the host
+ * requests four via {@code auxiliarySends(4)} but the ALC implementation may grant
+ * fewer), caps the pipeline to that count with {@link EfxPipeline#limitSends}, then
+ * calls {@code applyReverbPresets()} so the aux slots carry the four EAXREVERB
+ * effects. A config-GUI change re-applies those presets via
+ * {@link #reapplyReverbPresets} (marshalled onto this thread).
  */
 @Lwjgl3Aware
 public final class VoiceLifecycleListener implements IAudioLifecycleListener {
@@ -42,14 +45,19 @@ public final class VoiceLifecycleListener implements IAudioLifecycleListener {
 	@Override
 	public void contextCreated(final long deviceHandle) {
 		if (!ALC10.alcIsExtensionPresent(deviceHandle, "ALC_EXT_EFX")) {
-			SoundPhysics.log("Voice: ALC_EXT_EFX absent on voice device; occlusion disabled for this context.");
+			SoundPhysics.log("Voice: ALC_EXT_EFX absent on voice device; reverb/occlusion disabled for this context.");
 			return;
 		}
 
-		// Fresh pipeline on the voice device. No applyReverbPresets(): occlusion
-		// only, aux slots stay AL_EFFECT_NULL.
-		pipeline = new EfxPipeline().init(deviceHandle);
-		SoundPhysics.log("Voice: EFX occlusion pipeline initialized on voice context.");
+		// We requested four aux sends at registration; the context may have granted
+		// fewer. Cap routing to what was granted (routing an ungranted send raises
+		// AL_INVALID_VALUE), then load the reverb presets into the aux slots.
+		final int grantedSends = EfxPipeline.queryGrantedSends(deviceHandle);
+		pipeline = new EfxPipeline()
+				.init(deviceHandle)
+				.limitSends(grantedSends)
+				.applyReverbPresets();
+		SoundPhysics.log("Voice: reverb enabled, " + grantedSends + " aux sends granted.");
 	}
 
 	@Override
@@ -71,6 +79,20 @@ public final class VoiceLifecycleListener implements IAudioLifecycleListener {
 	public void sourceDestroying(final UUID sourceId, final int sourceHandle) {
 		handleByUuid.remove(sourceId);
 		envByUuid.remove(sourceId);
+	}
+
+	/**
+	 * Re-applies the reverb presets after a Config-GUI change, mirroring the game
+	 * pipeline's {@code SoundPhysics.onConfigChanged}. Touches AL, so it MUST be
+	 * submitted via {@code GtnhVoiceClientApi.audio().runOnAudioThread(...)} to run
+	 * here on the voice audio thread. No-ops when no voice context is live — the
+	 * next {@code contextCreated} loads the current presets anyway.
+	 */
+	public void reapplyReverbPresets() {
+		final EfxPipeline p = pipeline;
+		if (p == null) return;
+		p.applyReverbPresets();
+		SoundPhysics.log("Voice: reverb presets re-applied after config change.");
 	}
 
 	@Override

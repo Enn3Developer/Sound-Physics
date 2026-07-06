@@ -1,6 +1,7 @@
 package com.sonicether.soundphysics;
 
 import cpw.mods.fml.client.event.ConfigChangedEvent;
+import cpw.mods.fml.common.FMLCommonHandler;
 import cpw.mods.fml.common.Loader;
 import cpw.mods.fml.common.Mod;
 import cpw.mods.fml.common.event.FMLInitializationEvent;
@@ -61,6 +62,7 @@ public class SoundPhysics {
 	@Mod.EventHandler
 	public void init(final FMLInitializationEvent event) {
 		MinecraftForge.EVENT_BUS.register(this);
+		FMLCommonHandler.instance().bus().register(this);
 
 		// Sole bridge to the optional gtnh-voice integration. Guarded by the mod's
 		// presence so nothing in the com.sonicether.soundphysics.voice package (which
@@ -500,14 +502,14 @@ public class SoundPhysics {
 		}
 	}
 
-	// Voice path entry point (proximity chat occlusion). AL-free like
-	// computeEnvironment: runs on the client tick thread and returns an
-	// occlusion-only environment (neutral reverb sends) via isRain=true, reusing
-	// the exact same occlusion math and Config values as game sounds. The voice
-	// integration package is the only caller; keep it AL-free so it never has to
-	// touch the voice audio thread.
+	// Voice path entry point (proximity chat reverb + occlusion). AL-free like
+	// computeEnvironment: runs on the client tick thread and returns a FULL
+	// environment (isRain=false) — occlusion AND the golden-angle reverb ray cast —
+	// reusing the exact same math and Config values as game sounds. The full cast is
+	// raycast-heavy, so the voice integration budgets how many speakers it calls per
+	// tick; keep this AL-free so it never has to touch the voice audio thread.
 	public static SoundEnvironment computeVoiceEnvironment(final World world, final Vec3 playerPos, final Vec3 speakerPos) {
-		return computeEnvironment(world, playerPos, speakerPos, true);
+		return computeEnvironment(world, playerPos, speakerPos, false);
 	}
 
 	// Core environment compute: pure with respect to AL (no AL10/AL11/EFX10
