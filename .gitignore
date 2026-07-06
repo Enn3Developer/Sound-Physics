@@ -2,6 +2,7 @@
 .settings
 /.idea/
 /.vscode/
+/layout.json
 /run/
 /build/
 /eclipse/

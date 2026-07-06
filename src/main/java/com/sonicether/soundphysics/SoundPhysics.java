@@ -1,12 +1,5 @@
 package com.sonicether.soundphysics;
 
-import cpw.mods.fml.client.event.ConfigChangedEvent;
-import cpw.mods.fml.common.FMLCommonHandler;
-import cpw.mods.fml.common.Loader;
-import cpw.mods.fml.common.Mod;
-import cpw.mods.fml.common.event.FMLInitializationEvent;
-import cpw.mods.fml.common.event.FMLPreInitializationEvent;
-import cpw.mods.fml.common.eventhandler.SubscribeEvent;
 import me.eigenraven.lwjgl3ify.api.Lwjgl3Aware;
 import net.minecraft.block.Block;
 import net.minecraft.block.material.Material;
@@ -18,7 +11,6 @@ import net.minecraft.util.MathHelper;
 import net.minecraft.util.MovingObjectPosition;
 import net.minecraft.util.Vec3;
 import net.minecraft.world.World;
-import net.minecraftforge.common.MinecraftForge;
 import org.lwjgl.BufferUtils;
 import org.lwjgl.openal.AL10;
 import paulscode.sound.SoundBuffer;
@@ -34,8 +26,16 @@ import java.util.List;
 import java.util.ListIterator;
 import java.util.regex.Pattern;
 
-@Mod(modid = SoundPhysics.modid, name = SoundPhysics.modName, acceptedMinecraftVersions = SoundPhysics.mcVersion, version = SoundPhysics.version, guiFactory = "com.sonicether.soundphysics.SPGuiFactory",
-	dependencies="before:computronics;required-after:gtnhmixins@[2.0.0,);after:gtnhvoice") // 'before:computronics' loads SP's config before patching Computronics; 'after:gtnhvoice' (optional, not required) makes SP init run after gtnh-voice so its client API backend is ready when the VoiceIntegration bridge fires
+// Pure client-side logic class. It no longer carries @Mod / @Mod.EventHandler /
+// @SubscribeEvent — that lives on the server-safe entry class SoundPhysicsMod, whose
+// ClientProxy drives the preInit/init/config work below. This class is class-loaded
+// only on the client (via the early mixins and the ClientProxy), so it is free to
+// reference client-only, paulscode and org.lwjgl types.
+//
+// The modid/modName/version/mcVersion constants stay here because the gradle token
+// replacement (replaceGradleTokenInFile) rewrites @MODID@/@MODNAME@/@VERSION@ only in
+// this file; SoundPhysicsMod's @Mod inlines them at compile time.
+//
 // Escape lwjgl3ify's org.lwjgl -> org.lwjglx redirect: this class calls the real LWJGL3 AL API directly.
 // The annotation is per class FILE, so the AL-touching nested classes below carry their own copies.
 @Lwjgl3Aware
@@ -52,35 +52,6 @@ public class SoundPhysics {
 	private static final Pattern uiPattern = Pattern.compile(".*\\/ui\\/.*");
 	private static final Pattern clickPattern = Pattern.compile(".*random.click.*");
 	private static final Pattern noteBlockPattern = Pattern.compile(".*note/.*");
-
-	@Mod.EventHandler
-	public void preInit(final FMLPreInitializationEvent event) {
-		Config.instance.syncConfig();
-		applyConfigChanges();
-	}
-
-	@Mod.EventHandler
-	public void init(final FMLInitializationEvent event) {
-		MinecraftForge.EVENT_BUS.register(this);
-		FMLCommonHandler.instance().bus().register(this);
-
-		// Sole bridge to the optional gtnh-voice integration. Guarded by the mod's
-		// presence so nothing in the com.sonicether.soundphysics.voice package (which
-		// alone imports gtnh-voice) is class-loaded when the mod is absent. This line
-		// is the ONLY reference to the voice package from outside it.
-		if (Loader.isModLoaded("gtnhvoice")) {
-			com.sonicether.soundphysics.voice.VoiceIntegration.register();
-		}
-	}
-
-	@SubscribeEvent
-	public void onConfigChanged(final ConfigChangedEvent.OnConfigChangedEvent eventArgs) {
-		if (eventArgs.modID.equals(SoundPhysics.modid)) {
-			if(Config.instance.syncConfig()) {
-				applyConfigChanges();
-			}
-		}
-	}
 
 	private static final String logPrefix = "[SOUND PHYSICS]";
 	// EFX pipeline for the Minecraft/paulscode AL context; AL objects are

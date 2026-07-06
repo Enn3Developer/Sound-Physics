@@ -2,6 +2,7 @@ package com.sonicether.soundphysics;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 
 import net.minecraftforge.common.config.ConfigElement;
 import net.minecraftforge.common.config.Configuration;
@@ -70,13 +71,22 @@ public class Config {
 	public List<IConfigElement> getConfigElements() {
 		final ArrayList<IConfigElement> list = new ArrayList<>();
 
-		list.add(new ConfigElement(this.forgeConfig.getCategory(Config.categoryGeneral)));
-		list.add(new ConfigElement(this.forgeConfig.getCategory(Config.categoryPerformance)));
-		list.add(new ConfigElement(this.forgeConfig.getCategory(Config.categoryMaterialProperties)));
-		list.add(new ConfigElement(this.forgeConfig.getCategory(Config.categoryCompatibility)));
-		list.add(new ConfigElement(this.forgeConfig.getCategory(Config.categoryMisc)));
+		list.add(categoryElement(Config.categoryGeneral));
+		list.add(categoryElement(Config.categoryPerformance));
+		list.add(categoryElement(Config.categoryMaterialProperties));
+		list.add(categoryElement(Config.categoryCompatibility));
+		list.add(categoryElement(Config.categoryMisc));
 
 		return list;
+	}
+
+	// Configuration's property accessors (the getFloat/getBoolean calls in syncConfig)
+	// lowercase category names before lookup, but the raw getCategory used here does
+	// not - asking for "General" silently CREATES a new empty category next to the
+	// populated "general", which is why every category screen in the config GUI has
+	// been empty since upstream. Look up by the name the properties actually live under.
+	private ConfigElement categoryElement(final String category) {
+		return new ConfigElement(this.forgeConfig.getCategory(category.toLowerCase(Locale.ENGLISH)));
 	}
 
 	/**
