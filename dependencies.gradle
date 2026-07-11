@@ -51,14 +51,14 @@ dependencies {
     // com.sonicether.soundphysics.voice package touch it, and the sole bridge (SoundPhysics.init guarded by
     // Loader.isModLoaded("gtnhvoice")) never runs when the mod is absent. compileOnly so it is never published
     // as a dependency and never forced onto downstream runtimes.
-    compileOnly("com.github.Enn3Developer:gtnh-voice:v0.7.1:api")
+    compileOnly("com.github.Enn3Developer:gtnh-voice:v0.8.0:api")
 
     // Full gtnh-voice mod, present only in runClient for two-way voice testing. devOnlyNonPublishable keeps it
     // off every published dependency graph; never depend on this from mod code. gtnh-voice pulls unimixins
     // transitively (default classifier); the runClient environment already provides unimixins (dev classifier),
     // and both landing on the classpath makes FML abort with "duplicate mod sources" — so exclude the transitive
     // copy and let the base run environment supply the one unimixins.
-    devOnlyNonPublishable("com.github.Enn3Developer:gtnh-voice:v0.7.1:dev") {
+    devOnlyNonPublishable("com.github.Enn3Developer:gtnh-voice:v0.8.0:dev") {
         exclude group: "io.github.legacymoddingmc", module: "unimixins"
     }
 }

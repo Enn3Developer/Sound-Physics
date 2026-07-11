@@ -84,8 +84,8 @@ public final class VoiceLifecycleListener implements IAudioLifecycleListener {
 	/**
 	 * Re-applies the reverb presets after a Config-GUI change, mirroring the game
 	 * pipeline's {@code SoundPhysics.onConfigChanged}. Touches AL, so it MUST be
-	 * submitted via {@code GtnhVoiceClientApi.audio().runOnAudioThread(...)} to run
-	 * here on the voice audio thread. No-ops when no voice context is live — the
+	 * submitted via {@code IVoiceAddon.runOnAudioThread(...)} to run here on the
+	 * voice audio thread. No-ops when no voice context is live — the
 	 * next {@code contextCreated} loads the current presets anyway.
 	 */
 	public void reapplyReverbPresets() {

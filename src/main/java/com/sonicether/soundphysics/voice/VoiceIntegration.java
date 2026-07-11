@@ -1,8 +1,8 @@
 package com.sonicether.soundphysics.voice;
 
-import com.enn3developer.gtnhvoice.api.client.GtnhVoiceClientApi;
-import com.enn3developer.gtnhvoice.api.client.IClientAudioApi;
+import com.enn3developer.gtnhvoice.api.client.GtnhVoiceClient;
 import com.enn3developer.gtnhvoice.api.client.ISourceMetadata;
+import com.enn3developer.gtnhvoice.api.client.IVoiceAddon;
 import com.sonicether.soundphysics.SoundEnvironment;
 import com.sonicether.soundphysics.SoundPhysics;
 import cpw.mods.fml.client.event.ConfigChangedEvent;
@@ -23,7 +23,7 @@ import java.util.concurrent.ConcurrentHashMap;
  * Optional gtnh-voice proximity-chat reverb + occlusion integration. This package
  * is the only place in the mod that imports {@code com.enn3developer.gtnhvoice.**},
  * and it is class-loaded only when gtnh-voice is present (via the single guarded
- * call in {@link SoundPhysics#init(cpw.mods.fml.common.event.FMLInitializationEvent)}).
+ * call in {@link SoundPhysics#init()}).
  *
  * <p>Two threads cooperate through the maps below:
  * <ul>
@@ -58,26 +58,35 @@ public final class VoiceIntegration {
 	private static final int MAX_FULL_COMPUTES_PER_TICK = 2;
 	private int computeCursor;
 
+	// The addon handle everything flows through since v0.8.0: sourceMetadata on the
+	// client tick, runOnAudioThread on config changes. Durable for the client lifetime.
+	private final IVoiceAddon addon;
+
 	// Held so onConfigChanged can re-apply reverb presets to the live voice pipeline.
 	private final VoiceLifecycleListener lifecycle;
 
-	private VoiceIntegration(final VoiceLifecycleListener lifecycle) {
+	private VoiceIntegration(final IVoiceAddon addon, final VoiceLifecycleListener lifecycle) {
+		this.addon = addon;
 		this.lifecycle = lifecycle;
 	}
 
 	/**
-	 * Registers the durable voice lifecycle bundle and the client-tick compute
-	 * handler. Called once at FML init; gtnh-voice replays current context and
-	 * live sources to us on registration, so no reconnect handling is needed.
+	 * Registers the addon, its durable voice lifecycle bundle and the client-tick
+	 * compute handler. Called once at FML init; gtnh-voice replays current context
+	 * and live sources to us on registration, so no reconnect handling is needed.
+	 * The addon name is identity (unique, claimed for the client lifetime) and is
+	 * shown in gtnh-voice's Addons settings tab, hence the display-quality name.
 	 */
 	public static void register() {
 		final VoiceLifecycleListener lifecycle = new VoiceLifecycleListener(handleByUuid, envByUuid);
-		GtnhVoiceClientApi.audio()
-				.register("soundphysics")
+		final IVoiceAddon addon = GtnhVoiceClient.addon("Sound Physics")
+				.description("Proximity-chat reverb and occlusion")
+				.register();
+		addon.audio()
 				.auxiliarySends(REQUESTED_SENDS)
 				.lifecycle(lifecycle)
 				.done();
-		FMLCommonHandler.instance().bus().register(new VoiceIntegration(lifecycle));
+		FMLCommonHandler.instance().bus().register(new VoiceIntegration(addon, lifecycle));
 		SoundPhysics.log("Voice: registered gtnh-voice proximity reverb + occlusion integration.");
 	}
 
@@ -95,7 +104,6 @@ public final class VoiceIntegration {
 		if (mc.thePlayer == null || mc.theWorld == null) return;
 		if (handleByUuid.isEmpty()) return;
 
-		final IClientAudioApi audio = GtnhVoiceClientApi.audio();
 		final Vec3 playerEyePos = Vec3.createVectorHelper(mc.thePlayer.posX,
 				mc.thePlayer.posY + mc.thePlayer.getEyeHeight(), mc.thePlayer.posZ);
 
@@ -104,7 +112,7 @@ public final class VoiceIntegration {
 		final List<SpeakerPos> pending = new ArrayList<>();
 
 		for (final UUID sourceId : handleByUuid.keySet()) {
-			final Optional<ISourceMetadata> metadata = audio.sourceMetadata(sourceId);
+			final Optional<ISourceMetadata> metadata = addon.sourceMetadata(sourceId);
 			if (!metadata.isPresent()) continue;
 
 			final ISourceMetadata meta = metadata.get();
@@ -150,7 +158,7 @@ public final class VoiceIntegration {
 	@SubscribeEvent
 	public void onConfigChanged(final ConfigChangedEvent.OnConfigChangedEvent event) {
 		if (!event.modID.equals(SoundPhysics.modid)) return;
-		GtnhVoiceClientApi.audio().runOnAudioThread(lifecycle::reapplyReverbPresets);
+		addon.runOnAudioThread(lifecycle::reapplyReverbPresets);
 	}
 
 	// Immutable speaker id + resolved position, carried from the cheap classification

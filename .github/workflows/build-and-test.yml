@@ -11,6 +11,109 @@ on:
 jobs:
   build-and-test:
     uses: GTNewHorizons/GTNH-Actions-Workflows/.github/workflows/build-and-test.yml@master
-    secrets: inherit
     with:
+      # enableModernJavaSyntax = modern emits native Java 25 bytecode, which the shared
+      # workflow's Java 8 runServer cannot read. The run-server job below covers it instead.
       client-only: true
+    secrets: inherit
+
+  run-server:
+    name: Run server (modern Java)
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout mod repo
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Set up JDK versions
+        uses: actions/setup-java@v5
+        with:
+          java-version: |
+            8
+            17
+            21
+            25
+          distribution: 'zulu'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v5
+        with:
+          build-scan-publish: true
+          build-scan-terms-of-use-url: "https://gradle.com/terms-of-service"
+          build-scan-terms-of-use-agree: "yes"
+          validate-wrappers: true
+
+      - name: Grant execute permission for gradlew
+        run: chmod +x gradlew
+
+      - name: Setup the workspace
+        run: ./gradlew --build-cache --info --stacktrace setupCIWorkspace
+
+      - name: Run server
+        run: |
+          mkdir -p run/server
+          echo "eula=true" > run/eula.txt
+          echo "eula=true" > run/server/eula.txt
+          # Constant seed with a village at spawn
+          printf 'level-seed=-6202107849386030209\nonline-mode=true\n' > run/server.properties
+          printf 'level-seed=-6202107849386030209\nonline-mode=true\n' > run/server/server.properties
+          echo "stop" > run/stop.txt
+          timeout 600 ./gradlew --build-cache --info --stacktrace runServer25 2>&1 < run/stop.txt | tee -a server.log || true
+
+      - name: Test no errors reported during server run
+        run: |
+          shopt -s nullglob
+          crash_reports=(run/crash-reports/crash*.txt run/server/crash-reports/crash*.txt)
+          if (( ${#crash_reports[@]} > 0 )); then
+            printf 'Latest crash report detected %s:\n' "${crash_reports[-1]}" >&2
+            cat "${crash_reports[-1]}" >&2
+            exit 1
+          fi
+
+          for pattern in \
+            'Fatal errors were detected' \
+            'The state engine was in incorrect state ERRORED and forced into state SERVER_STOPPED' \
+            'Exception stopping the server'; do
+            if grep --quiet --fixed-strings "${pattern}" server.log; then
+              printf 'Server run failed on: %s\n' "${pattern}" >&2
+              exit 1
+            fi
+          done
+
+          if ! grep --quiet --fixed-strings 'Done (' server.log; then
+            echo 'Server did not finish startup' >&2
+            exit 1
+          fi
+
+      - name: Test the mod was loaded
+        # A clean startup proves nothing on its own: FML skips a mod jar it cannot parse and
+        # boots anyway. Sound Physics' server proxy is deliberately a no-op that logs nothing,
+        # so assert the mod id shows up in FML's own server log (mod construction/lifecycle
+        # lines) rather than grepping for a custom init message.
+        run: |
+          if grep --quiet --fixed-strings 'failed to read properly, it will be ignored' server.log; then
+            echo 'FML could not read the mod jar and ignored it' >&2
+            exit 1
+          fi
+
+          shopt -s nullglob
+          fml_logs=(run/logs/fml-server-latest.log run/server/logs/fml-server-latest.log)
+          if (( ${#fml_logs[@]} == 0 )); then
+            echo 'No FML server log found' >&2
+            exit 1
+          fi
+          if ! grep --quiet --fixed-strings 'soundphysics' "${fml_logs[@]}"; then
+            echo 'Server started but soundphysics never appeared in the FML logs' >&2
+            exit 1
+          fi
+
+      - name: Attach server log
+        if: failure()
+        uses: actions/upload-artifact@v7
+        continue-on-error: true
+        with:
+          name: ${{ github.repository_id }}-server-log
+          path: server.log
+          retention-days: 90
