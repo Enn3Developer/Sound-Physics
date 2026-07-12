@@ -1,0 +1,228 @@
+#version 430
+// Sound Physics acoustic tracer. Each invocation traces one ray fully
+// in-shader:
+//  - CHAIN rays walk a deterministic reflection chain (seedDir re-traces the
+//    identical chain, which is what revalidation relies on), accumulating
+//    transmission through transmissive materials, and emit one result per
+//    bounce prefix so early-delay buckets are fed even in enclosed spaces;
+//  - MARCH rays are straight transmission marches to an explicit target
+//    (final legs, direct occlusion, connectivity gates).
+// Traversal is two-level DDA: a coarse section-grid skip, then per-block.
+// Rays leaving the GPU window report open air. Water is just a material with
+// heavy-but-partial transmission; nothing above this shader knows it exists.
+
+layout(local_size_x = 64) in;
+
+const uint TYPE_CHAIN = 0u;
+const uint TYPE_MARCH = 1u;
+
+const uint FLAG_VALID = 1u;
+
+const int MAX_BOUNCES = 4;
+const int WINDOW = 256;
+// Materials at least this transmissive pass chain rays through (water, glass,
+// foliage); everything below reflects. Tuning constant.
+const float REFLECT_THRESHOLD = 0.45;
+const float MAX_LEG = 256.0;
+const float MIN_TRANSMISSION = 1e-4;
+const float MIN_ENERGY = 1e-3;
+
+struct Ray {
+    vec4 originType; // xyz origin, w = uintBitsToFloat(type)
+    vec4 dirParam;   // CHAIN: xyz dir, w = uintBitsToFloat(maxBounces); MARCH: xyz target
+};
+
+struct Result {
+    vec4 hitDist;    // xyz last hit / target, w total distance
+    vec4 payload;    // x energy, y avg chain reflectivity, z transmission, w = uintBitsToFloat(flags | bounces << 8)
+};
+
+layout(std430, binding = 0) readonly buffer Rays { Ray rays[]; };
+layout(std430, binding = 1) writeonly buffer Results { Result results[]; };
+layout(std140, binding = 2) uniform Palette { vec4 material[256]; }; // x reflectivity, y transmission/block
+
+layout(binding = 0) uniform usampler3D voxels;   // 256³ material ids, toroidally addressed
+layout(binding = 1) uniform usampler3D sections; // 16³ section flags, 0 = homogeneous air
+
+uniform ivec3 windowMin; // world block coord of the window's min corner
+uniform int rayCount;
+
+bool inWindow(ivec3 p) {
+    ivec3 d = p - windowMin;
+    return all(greaterThanEqual(d, ivec3(0))) && all(lessThan(d, ivec3(WINDOW)));
+}
+
+uint materialAt(ivec3 p) {
+    return texelFetch(voxels, p & (WINDOW - 1), 0).r;
+}
+
+bool sectionEmpty(ivec3 p) {
+    return texelFetch(sections, (p >> 4) & 15, 0).r == 0u;
+}
+
+struct Leg {
+    bool hit;         // stopped at a reflective voxel (chain legs only)
+    vec3 hitPos;
+    vec3 normal;
+    uint mat;
+    float dist;       // distance covered along the leg
+    float trans;      // transmission accumulated along the leg
+};
+
+// Exit distance of the 16³ section containing `pos` along the ray.
+float sectionExit(vec3 origin, vec3 invDir, ivec3 voxel) {
+    vec3 sectionMin = vec3((voxel >> 4) << 4);
+    vec3 t0 = (sectionMin - origin) * invDir;
+    vec3 t1 = (sectionMin + 16.0 - origin) * invDir;
+    vec3 tFar = max(t0, t1);
+    return min(min(tFar.x, tFar.y), tFar.z);
+}
+
+// One straight leg: per-block DDA with empty-section skipping. stopAtReflective
+// distinguishes chain legs (reflect off solid) from marches (attenuate through
+// everything). The origin voxel never blocks (grace for sources embedded in a
+// block — the old 0.867 source offset, done properly).
+Leg traceLeg(vec3 origin, vec3 dir, float maxT, bool stopAtReflective) {
+    Leg leg;
+    leg.hit = false;
+    leg.hitPos = origin;
+    leg.normal = vec3(0.0, 1.0, 0.0);
+    leg.mat = 0u;
+    leg.dist = maxT;
+    leg.trans = 1.0;
+
+    vec3 safeDir = vec3(
+            abs(dir.x) < 1e-8 ? 1e-8 : dir.x,
+            abs(dir.y) < 1e-8 ? 1e-8 : dir.y,
+            abs(dir.z) < 1e-8 ? 1e-8 : dir.z);
+    vec3 invDir = 1.0 / safeDir;
+    ivec3 stepDir = ivec3(sign(safeDir));
+    ivec3 graceVoxel = ivec3(floor(origin));
+
+    ivec3 voxel = graceVoxel;
+    vec3 nextBoundary = vec3(voxel) + max(vec3(stepDir), vec3(0.0));
+    vec3 tMax = (nextBoundary - origin) * invDir;
+    vec3 tDelta = abs(invDir);
+    float t = 0.0;
+    int lastAxis = 0;
+
+    for (int i = 0; i < 2048; i++) {
+        float tNext = min(min(tMax.x, tMax.y), tMax.z);
+        bool grace = all(equal(voxel, graceVoxel));
+
+        if (!inWindow(voxel)) {
+            // Open air beyond the window.
+            leg.dist = min(t, maxT);
+            return leg;
+        }
+
+        // Section flag gates the voxel fetch: all-air sections upload only the
+        // flag, so their voxel texels may be stale and must never be read.
+        if (sectionEmpty(voxel)) {
+            // Coarse level: hop the whole homogeneous-air section.
+            float tSkip = sectionExit(origin, invDir, voxel) + 1e-4;
+            if (tSkip >= maxT) { leg.dist = maxT; return leg; }
+            if (tSkip > tNext) {
+                t = tSkip;
+                voxel = ivec3(floor(origin + dir * t));
+                nextBoundary = vec3(voxel) + max(vec3(stepDir), vec3(0.0));
+                tMax = (nextBoundary - origin) * invDir;
+                continue;
+            }
+        } else if (!grace) {
+            uint m = materialAt(voxel);
+            if (m != 0u) {
+                vec4 mat = material[m];
+                if (stopAtReflective && mat.y < REFLECT_THRESHOLD) {
+                    leg.hit = true;
+                    leg.mat = m;
+                    leg.dist = t;
+                    leg.hitPos = origin + dir * t;
+                    vec3 n = vec3(0.0);
+                    n[lastAxis] = float(-stepDir[lastAxis]);
+                    leg.normal = n;
+                    return leg;
+                }
+                leg.trans *= pow(mat.y, min(tNext, maxT) - t);
+                if (leg.trans < MIN_TRANSMISSION) {
+                    leg.trans = 0.0;
+                    leg.dist = t;
+                    return leg;
+                }
+            }
+        }
+
+        if (tNext >= maxT) { leg.dist = maxT; return leg; }
+
+        if (tMax.x <= tMax.y && tMax.x <= tMax.z) lastAxis = 0;
+        else if (tMax.y <= tMax.z) lastAxis = 1;
+        else lastAxis = 2;
+
+        t = tMax[lastAxis];
+        voxel[lastAxis] += stepDir[lastAxis];
+        tMax[lastAxis] += tDelta[lastAxis];
+    }
+
+    leg.dist = min(t, maxT);
+    return leg;
+}
+
+void chainRay(uint idx, Ray ray) {
+    vec3 pos = ray.originType.xyz;
+    vec3 dir = normalize(ray.dirParam.xyz);
+    int maxBounces = clamp(int(floatBitsToUint(ray.dirParam.w)), 1, MAX_BOUNCES);
+
+    float trans = 1.0;
+    float energy = 1.0;
+    float dist = 0.0;
+    float reflSum = 0.0;
+
+    for (int b = 0; b < maxBounces; b++) {
+        Leg leg = traceLeg(pos, dir, MAX_LEG, true);
+        trans *= leg.trans;
+        if (!leg.hit) return; // escaped to open air or absorbed; earlier prefixes stand
+
+        dist += leg.dist;
+        float refl = material[leg.mat].x;
+        energy *= refl;
+        reflSum += refl;
+
+        float delivered = energy * trans;
+        results[idx * 4u + uint(b)] = Result(
+                vec4(leg.hitPos, dist),
+                vec4(delivered, reflSum / float(b + 1), trans,
+                        uintBitsToFloat(FLAG_VALID | uint(b + 1) << 8)));
+
+        if (delivered < MIN_ENERGY) return;
+        dir = reflect(dir, leg.normal);
+        pos = leg.hitPos + leg.normal * 1e-3;
+    }
+}
+
+void marchRay(uint idx, Ray ray) {
+    vec3 origin = ray.originType.xyz;
+    vec3 target = ray.dirParam.xyz;
+    vec3 delta = target - origin;
+    float len = length(delta);
+
+    float trans = 1.0;
+    if (len > 1e-3) {
+        Leg leg = traceLeg(origin, delta / len, len, false);
+        trans = leg.trans;
+    }
+    results[idx * 4u] = Result(vec4(target, len), vec4(0.0, 0.0, trans, uintBitsToFloat(FLAG_VALID)));
+}
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= uint(rayCount)) return;
+
+    results[idx * 4u] = Result(vec4(0.0), vec4(0.0));
+    results[idx * 4u + 1u] = Result(vec4(0.0), vec4(0.0));
+    results[idx * 4u + 2u] = Result(vec4(0.0), vec4(0.0));
+    results[idx * 4u + 3u] = Result(vec4(0.0), vec4(0.0));
+
+    Ray ray = rays[idx];
+    if (floatBitsToUint(ray.originType.w) == TYPE_MARCH) marchRay(idx, ray);
+    else chainRay(idx, ray);
+}

@@ -62,6 +62,7 @@ public class CoreModLoader implements IFMLLoadingPlugin, IEarlyMixinLoader {
 			}
 			mixins.add("MixinSoundSystem");
 			mixins.add("MixinWorld");
+			mixins.add("MixinChunk");
 		}
 		return mixins;
 	}

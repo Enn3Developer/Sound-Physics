@@ -21,17 +21,16 @@ public class Config {
 	public static float globalBlockAbsorption;
 	public static float globalBlockReflectance;
 	public static float airAbsorption;
-	public static float snowAirAbsorptionFactor;
-	public static float underwaterFilter;
 	public static boolean noteBlockEnable;
 
-	// performance
-	public static boolean skipRainOcclusionTracing;
-	public static int environmentEvaluationRays;
-	public static int environmentEvaluationRaysBounces;
-	public static boolean simplerSharedAirspaceSimulation;
-	public static boolean dynamicEnvironementEvalutaion;
-	public static int dynamicEnvironementEvalutaionFrequency;
+	// performance (worker tuning constants, all retunable live except the
+	// reservoir size, which shapes the store at engine start)
+	public static int workerRateHz;
+	public static int rayBudgetBase;
+	public static int rayBudgetPerSource;
+	public static int rayBudgetCap;
+	public static int revalidationFloorPct;
+	public static int reservoirSlots;
 
 	// block properties
 	public static float stoneReflectivity;
@@ -111,29 +110,22 @@ public class Config {
 				"Minecraft won't allow sounds to play past a certain distance. This parameter is a multiplier for how far away a sound source is allowed to be in order for it to actually play. Values too high can cause polyphony issues.");
 		airAbsorption = this.forgeConfig.getFloat("Air Absorption", categoryGeneral, 1.0f, 0.0f, 5.0f,
 				"A value controlling the amount that air absorbs high frequencies with distance. A value of 1.0 is physically correct for air with normal humidity and temperature. Higher values mean air will absorb more high frequencies with distance. 0 disables this effect.");
-		snowAirAbsorptionFactor = this.forgeConfig.getFloat("Max Snow Air Absorption Factor", categoryGeneral, 5.0f, 0.0f, 10.0f,
-				"The maximum air absorption factor when it's snowing. The real absorption factor will depend on the snow's intensity. Set to 1 or lower to disable");
-		underwaterFilter = this.forgeConfig.getFloat("Underwater Filter", categoryGeneral, 0.8f, 0.0f, 1.0f,
-				"How much sound is filtered when the player is underwater. 0.0 means no filter. 1.0 means fully filtered.");
 		noteBlockEnable = this.forgeConfig.getBoolean("Affect Note Blocks", categoryGeneral, true,
 				"If true, note blocks will be processed.");
 
 		// performance
-		skipRainOcclusionTracing = this.forgeConfig.getBoolean("Skip Rain Occlusion Tracing", categoryPerformance, true,
-				"If true, rain sound sources won't trace for sound occlusion. This can help performance during rain.");
-		environmentEvaluationRays = this.forgeConfig.getInt("Environment Evaluation Rays", categoryPerformance, 32, 8,
-				64,
-				"The number of rays to trace to determine reverberation for each sound source. More rays provides more consistent tracing results but takes more time to calculate. Decrease this value if you experience lag spikes when sounds play.");
-		environmentEvaluationRaysBounces = this.forgeConfig.getInt("Environment Evaluation Rays Bounces", categoryPerformance, 4, 1,
-				64,
-				"The number of rays bounces to determine reverberation for each sound source. More bounces provides more consistent tracing results but takes more time to calculate. Decrease this value if you experience lag spikes when sounds play.");
-		simplerSharedAirspaceSimulation = this.forgeConfig.getBoolean("Simpler Shared Airspace Simulation",
-				categoryPerformance, false,
-				"If true, enables a simpler technique for determining when the player and a sound source share airspace. Might sometimes miss recognizing shared airspace, but it's faster to calculate.");
-		dynamicEnvironementEvalutaion = this.forgeConfig.getBoolean("Dynamic environment evaluation", categoryPerformance, false,
-				"WARNING it's implemented really badly so i'd recommend not always using it.If true, the environment will keep getting evaluated for every sound that is currently playing. This may affect performance");
-		dynamicEnvironementEvalutaionFrequency = this.forgeConfig.getInt("Frequency of environment evaluation", categoryPerformance, 30, 1, 60,
-				"The frequency at witch to update environment of sounds if dynamic environment evaluation is enabled");
+		workerRateHz = this.forgeConfig.getInt("Worker Rate", categoryPerformance, 20, 5, 60,
+				"How many times per second the audio worker refreshes the acoustic cache (GPU trace + parameter updates). Independent of FPS.");
+		rayBudgetBase = this.forgeConfig.getInt("Ray Budget Base", categoryPerformance, 2048, 256, 8192,
+				"Rays traced per worker tick with no sounds playing (cache upkeep).");
+		rayBudgetPerSource = this.forgeConfig.getInt("Ray Budget Per Source", categoryPerformance, 64, 0, 512,
+				"Extra rays per worker tick for each playing sound source or voice speaker.");
+		rayBudgetCap = this.forgeConfig.getInt("Ray Budget Cap", categoryPerformance, 8192, 1024, 8192,
+				"Upper bound on rays per worker tick. Guards readback size and worker merge time, not GPU compute.");
+		revalidationFloorPct = this.forgeConfig.getInt("Revalidation Floor Percent", categoryPerformance, 25, 5, 75,
+				"Guaranteed minimum share of every ray batch spent re-checking cached paths. Keeps reverb tails from going stale under load.");
+		reservoirSlots = this.forgeConfig.getInt("Reservoir Samples Per Bucket", categoryPerformance, 4, 1, 16,
+				"Cached path samples per delay bucket per cell. REQUIRES RESTART.");
 
 		// material properties
 		stoneReflectivity = this.forgeConfig.getFloat("Stone Reflectivity", categoryMaterialProperties, 0.95f, 0.0f,

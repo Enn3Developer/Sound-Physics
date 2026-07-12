@@ -1,8 +1,8 @@
 package com.sonicether.soundphysics.voice;
 
 import com.enn3developer.gtnhvoice.api.client.IAudioLifecycleListener;
-import com.sonicether.soundphysics.EfxPipeline;
 import com.sonicether.soundphysics.SoundEnvironment;
+import com.sonicether.soundphysics.efx.EfxPipeline;
 import com.sonicether.soundphysics.SoundPhysics;
 import me.eigenraven.lwjgl3ify.api.Lwjgl3Aware;
 import org.lwjgl.openal.ALC10;

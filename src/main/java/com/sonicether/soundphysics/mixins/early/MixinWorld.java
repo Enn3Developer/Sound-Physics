@@ -1,16 +1,32 @@
 package com.sonicether.soundphysics.mixins.early;
 
 import com.sonicether.soundphysics.SoundPhysics;
+import net.minecraft.block.Block;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.player.EntityPlayer;
 import net.minecraft.world.World;
 import org.spongepowered.asm.mixin.Mixin;
+import org.spongepowered.asm.mixin.Shadow;
 import org.spongepowered.asm.mixin.injection.At;
+import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.ModifyArgs;
+import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 import org.spongepowered.asm.mixin.injection.invoke.arg.Args;
 
 @Mixin(World.class)
 public abstract class MixinWorld {
+
+    @Shadow
+    public boolean isRemote;
+
+    // Client-world setBlock → mark the section dirty in the CPU cache.
+    // Only successful changes on the client world matter.
+    @Inject(method = "setBlock(IIILnet/minecraft/block/Block;II)Z", at = @At("RETURN"))
+    private void soundphysics$markSectionDirty(int x, int y, int z, Block block, int metadata, int flags,
+                                               CallbackInfoReturnable<Boolean> cir) {
+        if (!cir.getReturnValueZ() || !this.isRemote) return;
+        SoundPhysics.onBlockChanged(x, y, z);
+    }
 
     @ModifyArgs(method = "playSoundAtEntity(Lnet/minecraft/entity/Entity;Ljava/lang/String;FF)V",
             at = @At(value = "INVOKE", target = "Lnet/minecraft/world/IWorldAccess;playSound(Ljava/lang/String;DDDFF)V"))

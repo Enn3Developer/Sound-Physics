@@ -1,5 +1,9 @@
-package com.sonicether.soundphysics;
+package com.sonicether.soundphysics.efx;
 
+import com.sonicether.soundphysics.Config;
+import com.sonicether.soundphysics.ReverbParams;
+import com.sonicether.soundphysics.SoundEnvironment;
+import com.sonicether.soundphysics.SoundPhysics;
 import me.eigenraven.lwjgl3ify.api.Lwjgl3Aware;
 import net.minecraft.util.MathHelper;
 import org.lwjgl.openal.AL10;

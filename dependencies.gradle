@@ -47,6 +47,13 @@ dependencies {
     // must never reach runServer.
     compileOnly("org.lwjgl:lwjgl-openal:3.3.3")
 
+    // Compile-time-only access to the real LWJGL3 OpenGL API (GL 4.3 compute-shader tracer in the gpu
+    // module). Same provisioning rationale as lwjgl-openal above: lwjgl3ify supplies the matching runtime
+    // jar with natives, so this must never be bundled or reach runServer. Deliberately NO lwjgl-glfw:
+    // lwjgl3ify does not provision the windowing API for mods (it may run on SDL3 instead) — the worker's
+    // GL context comes from org.lwjglx.opengl.SharedDrawable (the lwjgl3ify dev jar above).
+    compileOnly("org.lwjgl:lwjgl-opengl:3.3.3")
+
     // gtnh-voice addon API (@Lwjgl3Aware voice audio hooks). OPTIONAL at runtime: only the classes in the
     // com.sonicether.soundphysics.voice package touch it, and the sole bridge (SoundPhysics.init guarded by
     // Loader.isModLoaded("gtnhvoice")) never runs when the mod is absent. compileOnly so it is never published

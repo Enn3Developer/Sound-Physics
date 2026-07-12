@@ -5,38 +5,31 @@ import com.enn3developer.gtnhvoice.api.client.ISourceMetadata;
 import com.enn3developer.gtnhvoice.api.client.IVoiceAddon;
 import com.sonicether.soundphysics.SoundEnvironment;
 import com.sonicether.soundphysics.SoundPhysics;
+import com.sonicether.soundphysics.SoundPhysicsEngine;
 import cpw.mods.fml.client.event.ConfigChangedEvent;
 import cpw.mods.fml.common.FMLCommonHandler;
 import cpw.mods.fml.common.eventhandler.SubscribeEvent;
 import cpw.mods.fml.common.gameevent.TickEvent;
-import net.minecraft.client.Minecraft;
-import net.minecraft.util.Vec3;
-import net.minecraft.world.World;
 
-import java.util.ArrayList;
-import java.util.List;
+import java.util.HashSet;
+import java.util.Iterator;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * Optional gtnh-voice proximity-chat reverb + occlusion integration. This package
- * is the only place in the mod that imports {@code com.enn3developer.gtnhvoice.**},
- * and it is class-loaded only when gtnh-voice is present (via the single guarded
- * call in {@link SoundPhysics#init()}).
+ * Optional gtnh-voice proximity-chat reverb + occlusion integration. This
+ * package is the only place in the mod that imports
+ * {@code com.enn3developer.gtnhvoice.**}, and it is class-loaded only when
+ * gtnh-voice is present (via the single guarded call in the ClientProxy).
  *
- * <p>Two threads cooperate through the maps below:
- * <ul>
- *   <li>the voice AUDIO thread owns {@link #handleByUuid} (written from the
- *       lifecycle listener's {@code sourceCreated}/{@code sourceDestroying}) and
- *       consumes {@link #envByUuid} in {@code audioTick};</li>
- *   <li>the CLIENT TICK thread reads {@link #handleByUuid} to know which speakers
- *       exist and writes {@link #envByUuid} with freshly computed environments.</li>
- * </ul>
- * Both maps are {@link ConcurrentHashMap} for that reason. This class touches no
- * {@code org.lwjgl} API (all AL work lives in {@link VoiceLifecycleListener} and
- * {@link com.sonicether.soundphysics.EfxPipeline}), so it needs no
- * {@code @Lwjgl3Aware}.
+ * <p>Speakers are sources like any other: the client tick
+ * feeds speaker positions into the engine's active-source registry, their
+ * cells get batch priority while speaking, and the audio worker estimates
+ * from the same store/estimator and writes results into {@link #envByUuid}
+ * (the voice sink). The voice audio thread applies them in {@code audioTick}
+ * via {@link VoiceLifecycleListener}. There is no dedicated ray budget — the
+ * old per-tick ray rationing does not exist here.
  */
 public final class VoiceIntegration {
 
@@ -44,19 +37,14 @@ public final class VoiceIntegration {
 	// the client tick thread.
 	static final ConcurrentHashMap<UUID, Integer> handleByUuid = new ConcurrentHashMap<>();
 
-	// speaker UUID -> latest computed environment. Written on the client tick thread,
-	// read on the voice audio thread.
+	// speaker UUID -> latest estimated environment. Written by the audio worker
+	// (positional) and the client tick (flat passthrough), read on the voice
+	// audio thread.
 	static final ConcurrentHashMap<UUID, SoundEnvironment> envByUuid = new ConcurrentHashMap<>();
 
 	// Aux sends this integration REQUESTS per voice source (max the four-slot reverb
 	// bus can drive). The context may grant fewer; VoiceLifecycleListener degrades.
 	private static final int REQUESTED_SENDS = 4;
-
-	// The full golden-angle reverb ray cast is expensive, so cap how many speakers
-	// get it per client tick and rotate which ones through computeCursor. Cheap
-	// checks (positional/flat/no-position) still run every tick for every speaker.
-	private static final int MAX_FULL_COMPUTES_PER_TICK = 2;
-	private int computeCursor;
 
 	// The addon handle everything flows through since v0.8.0: sourceMetadata on the
 	// client tick, runOnAudioThread on config changes. Durable for the client lifetime.
@@ -65,6 +53,11 @@ public final class VoiceIntegration {
 	// Held so onConfigChanged can re-apply reverb presets to the live voice pipeline.
 	private final VoiceLifecycleListener lifecycle;
 
+	// Client tick thread only: speakers currently registered with the engine,
+	// diffed against handleByUuid so departed speakers leave the registry.
+	private final HashSet<UUID> trackedSpeakers = new HashSet<>();
+	private boolean sinkWired;
+
 	private VoiceIntegration(final IVoiceAddon addon, final VoiceLifecycleListener lifecycle) {
 		this.addon = addon;
 		this.lifecycle = lifecycle;
@@ -72,10 +65,8 @@ public final class VoiceIntegration {
 
 	/**
 	 * Registers the addon, its durable voice lifecycle bundle and the client-tick
-	 * compute handler. Called once at FML init; gtnh-voice replays current context
+	 * position feed. Called once at FML init; gtnh-voice replays current context
 	 * and live sources to us on registration, so no reconnect handling is needed.
-	 * The addon name is identity (unique, claimed for the client lifetime) and is
-	 * shown in gtnh-voice's Addons settings tab, hence the display-quality name.
 	 */
 	public static void register() {
 		final VoiceLifecycleListener lifecycle = new VoiceLifecycleListener(handleByUuid, envByUuid);
@@ -91,25 +82,31 @@ public final class VoiceIntegration {
 	}
 
 	/**
-	 * Client-tick compute: for every tracked speaker, run the cheap classification
-	 * (flat -> passthrough, no-position -> skip) and, for positional speakers,
-	 * budget the raycast-heavy full environment compute round-robin across ticks.
-	 * This is where the heavy work happens — never in the audio pump.
+	 * Client-tick feed: positional speakers go into the engine's registry
+	 * (positions refreshed every tick — cheap map writes, no tracing here);
+	 * flat/group voice gets a passthrough environment and stays out of the
+	 * simulation entirely.
 	 */
 	@SubscribeEvent
 	public void onClientTick(final TickEvent.ClientTickEvent event) {
 		if (event.phase != TickEvent.Phase.END) return;
+		final SoundPhysicsEngine engine = SoundPhysicsEngine.instance();
+		if (engine == null) return; // engine unavailable → voice stays vanilla
 
-		final Minecraft mc = Minecraft.getMinecraft();
-		if (mc.thePlayer == null || mc.theWorld == null) return;
-		if (handleByUuid.isEmpty()) return;
+		if (!sinkWired) {
+			engine.setVoiceSink(envByUuid::put);
+			sinkWired = true;
+		}
 
-		final Vec3 playerEyePos = Vec3.createVectorHelper(mc.thePlayer.posX,
-				mc.thePlayer.posY + mc.thePlayer.getEyeHeight(), mc.thePlayer.posZ);
-
-		// Cheap pass: classify every speaker every tick, collecting the positional
-		// ones that need the full compute so we can budget them below.
-		final List<SpeakerPos> pending = new ArrayList<>();
+		// Departed speakers (source destroyed, context torn down) leave the
+		// engine registry.
+		for (final Iterator<UUID> it = trackedSpeakers.iterator(); it.hasNext(); ) {
+			final UUID id = it.next();
+			if (handleByUuid.containsKey(id)) continue;
+			engine.removeSpeaker(id);
+			envByUuid.remove(id);
+			it.remove();
+		}
 
 		for (final UUID sourceId : handleByUuid.keySet()) {
 			final Optional<ISourceMetadata> metadata = addon.sourceMetadata(sourceId);
@@ -117,59 +114,31 @@ public final class VoiceIntegration {
 
 			final ISourceMetadata meta = metadata.get();
 			if (!meta.positional()) {
-				// Flat/group voice must get NO effects
+				// Flat/group voice must get NO effects.
 				envByUuid.put(sourceId, SoundEnvironment.passthrough());
+				if (trackedSpeakers.remove(sourceId)) engine.removeSpeaker(sourceId);
 				continue;
 			}
 
 			// (0,0,0) means a brand-new source (~first 20 ms) with no real
-			// position yet; wait for a real one before raycasting.
+			// position yet; wait for a real one.
 			if (meta.x() == 0.0 && meta.y() == 0.0 && meta.z() == 0.0) continue;
 
-			pending.add(new SpeakerPos(sourceId, Vec3.createVectorHelper(meta.x(), meta.y(), meta.z())));
+			engine.updateSpeaker(sourceId, meta.x(), meta.y(), meta.z());
+			trackedSpeakers.add(sourceId);
 		}
-
-		computeBudgeted(mc.theWorld, playerEyePos, pending);
-	}
-
-	// Full-compute budget: run at most MAX_FULL_COMPUTES_PER_TICK speakers this tick,
-	// starting at computeCursor so a large speaker set is covered over several ticks
-	// instead of starving the tail. Speakers not picked keep their cached env.
-	private void computeBudgeted(final World world, final Vec3 playerEyePos, final List<SpeakerPos> pending) {
-		if (pending.isEmpty()) return;
-
-		final int budget = Math.min(MAX_FULL_COMPUTES_PER_TICK, pending.size());
-		for (int i = 0; i < budget; i++) {
-			final SpeakerPos speaker = pending.get((computeCursor + i) % pending.size());
-			envByUuid.put(speaker.sourceId,
-					SoundPhysics.computeVoiceEnvironment(world, playerEyePos, speaker.speakerPos));
-		}
-		computeCursor = (computeCursor + budget) % pending.size();
 	}
 
 	/**
 	 * Config-GUI live refresh for voice reverb, mirroring
-	 * {@code SoundPhysics.onConfigChanged} for the game pipeline. Fires on the FML
-	 * bus (where {@code OnConfigChangedEvent} is posted, and where this integration
-	 * is registered); filtered to soundphysics' own config. AL work is marshalled
-	 * onto the voice audio thread — dropped when no voice session is live, which is
+	 * {@code SoundPhysics.applyConfigChanges} for the game pipeline. Fires on the
+	 * FML bus; filtered to soundphysics' own config. AL work is marshalled onto
+	 * the voice audio thread — dropped when no voice session is live, which is
 	 * fine: the next {@code contextCreated} loads the current presets anyway.
 	 */
 	@SubscribeEvent
 	public void onConfigChanged(final ConfigChangedEvent.OnConfigChangedEvent event) {
 		if (!event.modID.equals(SoundPhysics.modid)) return;
 		addon.runOnAudioThread(lifecycle::reapplyReverbPresets);
-	}
-
-	// Immutable speaker id + resolved position, carried from the cheap classification
-	// pass into the budgeted full compute.
-	private static final class SpeakerPos {
-		final UUID sourceId;
-		final Vec3 speakerPos;
-
-		SpeakerPos(final UUID sourceId, final Vec3 speakerPos) {
-			this.sourceId = sourceId;
-			this.speakerPos = speakerPos;
-		}
 	}
 }
