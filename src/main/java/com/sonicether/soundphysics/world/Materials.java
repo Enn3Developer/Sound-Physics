@@ -133,6 +133,16 @@ public final class Materials {
 		}
 	}
 
+	/** CPU-side per-voxel transmission, high band — the palette's UBO value. */
+	public static float cpuTransmissionHigh(final int materialId) {
+		return (float) Math.pow(TRANSMISSION[materialId], Config.globalBlockAbsorption);
+	}
+
+	/** CPU-side per-voxel transmission, low band (lows pass matter more easily). */
+	public static float cpuTransmissionLow(final int materialId) {
+		return (float) Math.sqrt(cpuTransmissionHigh(materialId));
+	}
+
 	private static byte classify(final Block block) {
 		if (block == null) return AIR;
 		final Material blockMaterial = block.getMaterial();

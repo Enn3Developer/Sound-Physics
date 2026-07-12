@@ -2,13 +2,14 @@ package com.sonicether.soundphysics;
 
 import com.sonicether.soundphysics.efx.ApplyQueue;
 import com.sonicether.soundphysics.efx.EfxPipeline;
+import com.sonicether.soundphysics.field.CellKeys;
+import com.sonicether.soundphysics.field.FieldStore;
+import com.sonicether.soundphysics.field.ListenerField;
 import com.sonicether.soundphysics.gpu.TraceContext;
-import com.sonicether.soundphysics.restir.Cell;
-import com.sonicether.soundphysics.restir.ConnectivityCache;
-import com.sonicether.soundphysics.restir.ReservoirStore;
 import com.sonicether.soundphysics.scheduler.ActiveSources;
 import com.sonicether.soundphysics.scheduler.AudioWorker;
 import com.sonicether.soundphysics.shape.Estimator;
+import com.sonicether.soundphysics.world.DirectMarch;
 import com.sonicether.soundphysics.world.SectionCache;
 import net.minecraft.block.material.Material;
 import net.minecraft.client.Minecraft;
@@ -31,8 +32,8 @@ public final class SoundPhysicsEngine {
 	private static boolean initFailed;
 
 	private final SectionCache sectionCache = new SectionCache();
-	private final ReservoirStore store;
-	private final ConnectivityCache connectivity = new ConnectivityCache();
+	private final FieldStore field = new FieldStore();
+	private final ListenerField listenerField = new ListenerField();
 	private final ActiveSources sources = new ActiveSources();
 	private final ApplyQueue applyQueue = new ApplyQueue();
 	private final com.sonicether.soundphysics.scheduler.RainProbes rainProbes =
@@ -82,8 +83,7 @@ public final class SoundPhysicsEngine {
 	}
 
 	private SoundPhysicsEngine(final TraceContext context) {
-		store = new ReservoirStore(Config.reservoirSlots);
-		worker = new AudioWorker(context, sectionCache, store, connectivity, sources, applyQueue, gamePipeline,
+		worker = new AudioWorker(context, sectionCache, field, listenerField, sources, applyQueue, gamePipeline,
 				rainProbes);
 	}
 
@@ -94,8 +94,8 @@ public final class SoundPhysicsEngine {
 		if (world != lastWorld) {
 			lastWorld = world;
 			sectionCache.clear();
-			store.clear();
-			connectivity.clear();
+			field.clear();
+			listenerField.clear();
 			sources.clear();
 			worker.markWorldChanged();
 		}
@@ -146,13 +146,6 @@ public final class SoundPhysicsEngine {
 	public void onPlaySound(final float x, final float y, final float z, final int sourceId,
 			final boolean directOnly) {
 		final ActiveSources.GameSource source = sources.onPlay(sourceId, x, y, z, directOnly);
-		Cell cell = null;
-		if (!directOnly) {
-			final long now = System.currentTimeMillis();
-			cell = store.getOrCreate(source.cellKey(), now);
-			cell.adoptOrigin(x, y + 0.3f, z);
-			cell.touch(now);
-		}
 		if (!gamePipeline.isInitialized()) return;
 
 		// Propagation delay: thunder arrives late. Pause now (play thread owns
@@ -165,10 +158,32 @@ public final class SoundPhysicsEngine {
 			gamePipeline.pauseForDelay(sourceId);
 			source.resumeAtNanos = System.nanoTime() + (long) (distance / SPEED_OF_SOUND * 1.0e9);
 		}
-		gamePipeline.apply(sourceId, Estimator.estimate(cell == null ? null : cell.samples(),
-				cell == null ? null : cell.bucketEnergy(),
-				source.directTransmission, source.directTransmissionLow, (float) sectionCache.listenerX(),
-				(float) sectionCache.listenerY(), (float) sectionCache.listenerZ()));
+
+		// Onset occlusion: a synchronous CPU march for the straight line. Most
+		// sounds are shorter than the worker's first correction, so the filter
+		// they start with is the one that matters — and it must be the LINE,
+		// not the graph's best path (which is ~1.0 near the listener and blind
+		// inside a cell). The GPU bundle refines whatever is still playing.
+		// Rain re-plays through fresh sources constantly, so for rain this
+		// onset IS the occlusion.
+		final float[] onset = new float[2];
+		DirectMarch.trace(sectionCache, x, y, z,
+				sectionCache.listenerX(), sectionCache.listenerY(), sectionCache.listenerZ(), onset);
+		source.directTransmission = onset[0];
+		source.directTransmissionLow = onset[1];
+
+		// The field supplies what the graph IS for: reverb character and the
+		// best-path diffraction floor that keeps around-the-corner sources
+		// audible. A direct-only source must not borrow the reverb of
+		// whatever cell happens to share its position.
+		final float euclid = (float) distance;
+		final long cellKey = CellKeys.ofBlock(x, y, z);
+		final ListenerField.Node node = listenerField.sample(cellKey);
+		final float pathHigh = !directOnly && node != null ? node.transHigh() : 0.0f;
+		final float pathLow = !directOnly && node != null ? node.transLow() : 0.0f;
+		final float pathDist = node == null ? euclid : node.pathDist();
+		gamePipeline.apply(sourceId, Estimator.estimate(directOnly ? null : field.stats(cellKey),
+				pathHigh, pathLow, pathDist, euclid, onset[0], onset[1]));
 	}
 
 	/** Sounds that skip simulation (menu, records, music, rain): reset the reused AL source. */

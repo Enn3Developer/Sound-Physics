@@ -25,14 +25,12 @@ public class Config {
 	public static float underwaterFilter;
 	public static boolean noteBlockEnable;
 
-	// performance (worker tuning constants, all retunable live except the
-	// reservoir size, which shapes the store at engine start)
+	// performance (worker tuning constants, all retunable live)
 	public static int workerRateHz;
 	public static int rayBudgetBase;
 	public static int rayBudgetPerSource;
 	public static int rayBudgetCap;
-	public static int revalidationFloorPct;
-	public static int reservoirSlots;
+	public static int fieldRadius;
 
 	// block properties
 	public static float stoneReflectivity;
@@ -123,16 +121,14 @@ public class Config {
 		// performance
 		workerRateHz = this.forgeConfig.getInt("Worker Rate", categoryPerformance, 20, 5, 60,
 				"How many times per second the audio worker refreshes the acoustic cache (GPU trace + parameter updates). Independent of FPS.");
-		rayBudgetBase = this.forgeConfig.getInt("Ray Budget Base", categoryPerformance, 2048, 256, 8192,
-				"Rays traced per worker tick with no sounds playing (cache upkeep).");
+		rayBudgetBase = this.forgeConfig.getInt("Ray Budget Base", categoryPerformance, 4096, 256, 8192,
+				"Rays traced per worker tick with no sounds playing (field upkeep: probes and edge bakes).");
 		rayBudgetPerSource = this.forgeConfig.getInt("Ray Budget Per Source", categoryPerformance, 64, 0, 512,
 				"Extra rays per worker tick for each playing sound source or voice speaker.");
 		rayBudgetCap = this.forgeConfig.getInt("Ray Budget Cap", categoryPerformance, 8192, 1024, 8192,
 				"Upper bound on rays per worker tick. Guards readback size and worker merge time, not GPU compute.");
-		revalidationFloorPct = this.forgeConfig.getInt("Revalidation Floor Percent", categoryPerformance, 25, 5, 75,
-				"Guaranteed minimum share of every ray batch spent re-checking cached paths. Keeps reverb tails from going stale under load.");
-		reservoirSlots = this.forgeConfig.getInt("Reservoir Samples Per Bucket", categoryPerformance, 4, 1, 16,
-				"Cached path samples per delay bucket per cell. REQUIRES RESTART.");
+		fieldRadius = this.forgeConfig.getInt("Field Radius", categoryPerformance, 64, 32, 128,
+				"Radius in blocks around the listener kept acoustically baked (cell probes + connectivity graph). Sounds beyond it get direct-path occlusion only. Larger radii cost more GPU upkeep and CPU pathfinding.");
 
 		// material properties
 		stoneReflectivity = this.forgeConfig.getFloat("Stone Reflectivity", categoryMaterialProperties, 0.95f, 0.0f,

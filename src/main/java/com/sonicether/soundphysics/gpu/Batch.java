@@ -8,18 +8,16 @@ import java.nio.IntBuffer;
 /**
  * CPU staging for one ray batch: typed add-methods write
  * the GPU ray records; parallel metadata arrays route each result slot back
- * to what requested it (cell/slot for revalidations, source for direct rays,
- * pair for connectivity…). Plain NIO, no GL — the scheduler composes off any
- * thread and {@link TracePipeline} uploads it.
+ * to what requested it (probe round, edge bake, path validation, source…).
+ * Plain NIO, no GL — the scheduler composes off any thread and
+ * {@link TracePipeline} uploads it.
  */
 public final class Batch {
 
-	public static final byte KIND_CANDIDATE = 0;
-	public static final byte KIND_REVALIDATION = 1;
-	public static final byte KIND_FINAL_LEG = 2;
+	public static final byte KIND_PROBE = 0;
+	public static final byte KIND_EDGE = 1;
+	public static final byte KIND_PATH = 2;
 	public static final byte KIND_DIRECT = 3;
-	public static final byte KIND_CONNECTIVITY = 4;
-	public static final byte KIND_PREFETCH = 5;
 
 	// Must match trace.comp.
 	private static final int TYPE_CHAIN = 0;
@@ -33,10 +31,8 @@ public final class Batch {
 	private final IntBuffer ints;
 
 	public final byte[] kind;
-	public final long[] cellKey;
-	public final int[] meta; // bucket << 8 | slot for revalidation/final-leg
-	public final Object[] tag; // Cell / PairKey / source state / expected PathSample holder
-	public final Object[] expected; // PathSample the slot held at compose time
+	public final int[] meta; // hero-ray index for edges, probe index for rain
+	public final Object[] tag; // ProbeRound / EdgeBake / PathValidation / source state
 	public final float[] seedX;
 	public final float[] seedY;
 	public final float[] seedZ;
@@ -49,10 +45,8 @@ public final class Batch {
 		floats = bytes.asFloatBuffer();
 		ints = bytes.asIntBuffer();
 		kind = new byte[capacity];
-		cellKey = new long[capacity];
 		meta = new int[capacity];
 		tag = new Object[capacity];
-		expected = new Object[capacity];
 		seedX = new float[capacity];
 		seedY = new float[capacity];
 		seedZ = new float[capacity];
@@ -70,13 +64,12 @@ public final class Batch {
 		return size >= capacity;
 	}
 
-	/** Bounce-chain ray (candidates, revalidations). Returns the slot index. */
+	/** Bounce-chain ray (cell probes). Returns the slot index. */
 	public int addChain(final float originX, final float originY, final float originZ,
 			final float dirX, final float dirY, final float dirZ, final int maxBounces,
-			final byte rayKind, final long rayCellKey, final Object rayTag, final int rayMeta,
-			final Object expectedSample) {
+			final byte rayKind, final Object rayTag, final int rayMeta) {
 		final int slot = writeCommon(originX, originY, originZ, TYPE_CHAIN,
-				dirX, dirY, dirZ, rayKind, rayCellKey, rayTag, rayMeta, expectedSample);
+				dirX, dirY, dirZ, rayKind, rayTag, rayMeta);
 		ints.put(slot * RAY_FLOATS + 7, maxBounces);
 		seedX[slot] = dirX;
 		seedY[slot] = dirY;
@@ -85,19 +78,18 @@ public final class Batch {
 	}
 
 	/**
-	 * Straight transmission march (final legs, connectivity gates).
+	 * Straight transmission march (edge hero rays, path-validation segments).
 	 * {@code graceTarget} skips attenuation inside the target's voxel — set for
 	 * listener-targeted rays (the listener's head being inside a voxel proves
 	 * it isn't blocking their ears; think top-slab ceilings sharing the head's
-	 * voxel row), never for connectivity gates (a neighbor cell centered in a
-	 * wall must stay sealed).
+	 * voxel row), never for cell-to-cell rays (an air pocket walled off from
+	 * its neighbor must stay sealed).
 	 */
 	public int addMarch(final float originX, final float originY, final float originZ,
 			final float targetX, final float targetY, final float targetZ, final boolean graceTarget,
-			final byte rayKind, final long rayCellKey, final Object rayTag, final int rayMeta,
-			final Object expectedSample) {
+			final byte rayKind, final Object rayTag, final int rayMeta) {
 		final int slot = writeCommon(originX, originY, originZ, TYPE_MARCH,
-				targetX, targetY, targetZ, rayKind, rayCellKey, rayTag, rayMeta, expectedSample);
+				targetX, targetY, targetZ, rayKind, rayTag, rayMeta);
 		floats.put(slot * RAY_FLOATS + 7, graceTarget ? 1.0f : 0.0f);
 		return slot;
 	}
@@ -110,7 +102,7 @@ public final class Batch {
 	public int addDirect(final float originX, final float originY, final float originZ,
 			final float targetX, final float targetY, final float targetZ, final Object rayTag, final int rayMeta) {
 		final int slot = writeCommon(originX, originY, originZ, TYPE_DIRECT,
-				targetX, targetY, targetZ, KIND_DIRECT, 0L, rayTag, rayMeta, null);
+				targetX, targetY, targetZ, KIND_DIRECT, rayTag, rayMeta);
 		floats.put(slot * RAY_FLOATS + 7, 1.0f);
 		return slot;
 	}
@@ -123,8 +115,7 @@ public final class Batch {
 
 	private int writeCommon(final float originX, final float originY, final float originZ, final int type,
 			final float vecX, final float vecY, final float vecZ,
-			final byte rayKind, final long rayCellKey, final Object rayTag, final int rayMeta,
-			final Object expectedSample) {
+			final byte rayKind, final Object rayTag, final int rayMeta) {
 		final int slot = size++;
 		final int base = slot * RAY_FLOATS;
 		floats.put(base, originX);
@@ -135,10 +126,8 @@ public final class Batch {
 		floats.put(base + 5, vecY);
 		floats.put(base + 6, vecZ);
 		kind[slot] = rayKind;
-		cellKey[slot] = rayCellKey;
 		tag[slot] = rayTag;
 		meta[slot] = rayMeta;
-		expected[slot] = expectedSample;
 		return slot;
 	}
 }

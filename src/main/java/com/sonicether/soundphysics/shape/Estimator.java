@@ -1,29 +1,30 @@
 package com.sonicether.soundphysics.shape;
 
 import com.sonicether.soundphysics.SoundEnvironment;
-import com.sonicether.soundphysics.restir.Cell;
-import com.sonicether.soundphysics.restir.PathSample;
+import com.sonicether.soundphysics.field.CellProbe;
 
 /**
- * Pure math, no tracing calls: maps a cell's path samples
- * (with their measured final-leg transmissions) plus the source's direct
- * transmission to the four EFX send gain/cutoff pairs and the direct filter.
- * The ear-tuned constants are inherited from the old
- * {@code accumulateSend}/{@code shapeEnvironment} (delay = distance × 0.12 ×
- * reflectivity, crossfade centers 0/1/2 with a ramp ≥ 2, send gains
- * 6.4/12.8/12.8/12.8), retunable by ear. Headless-testable with synthetic
- * samples — no MC types anywhere in this package.
+ * Pure math, no tracing calls: maps a source cell's probe stats plus the
+ * transport-field path to the listener (two-band transmission, acoustic path
+ * length) and the source's direct-ray transmission to the four EFX send
+ * gain/cutoff pairs and the direct filter. The ear-tuned constants are
+ * inherited from the old {@code accumulateSend}/{@code shapeEnvironment}
+ * (delay = distance × 0.12 × reflectivity, crossfade centers 0/1/2 with a
+ * ramp ≥ 2, send gains 6.4/12.8/12.8/12.8), retunable by ear.
+ * Headless-testable with synthetic stats — no MC types anywhere here.
  */
 public final class Estimator {
 
 	// Inherited crossfade constant: reflection delay per block of path length.
 	private static final float DELAY_PER_BLOCK = 0.12f;
 
-	// Inherited per-bounce energy scale (the old energyTowardsPlayer factor —
-	// only a fraction of a reflection's energy radiates toward the listener)
-	// combined with the old 1/(rays × bounces) normalization's bounce term:
-	// the measured bucket energy sums up to MAX_BOUNCES prefixes per ray.
-	private static final float ENERGY_SCALE = 0.25f / 4.0f;
+	// Per-bounce energy scale (the old energyTowardsPlayer factor — only a
+	// fraction of a reflection's energy radiates toward the listener) combined
+	// with the old 1/(rays × bounces) normalization's bounce term: the
+	// measured bucket energy sums up to MAX_BOUNCES prefixes per ray. Doubled
+	// from the inherited 0.25/4 — the field estimator's 4-bucket aggregation
+	// reads quieter than the old per-sample accumulation did (ear-tuned).
+	private static final float ENERGY_SCALE = 0.25f / 2.0f;
 
 	// Inherited per-send energy gains.
 	private static final float[] SEND_ENERGY_GAIN = { 6.4f, 12.8f, 12.8f, 12.8f };
@@ -48,7 +49,7 @@ public final class Estimator {
 	private Estimator() {
 	}
 
-	/** Delay-bucket assignment, derived from raw distance at merge/estimate time. */
+	/** Delay-bucket assignment for probe chain hits. */
 	public static int bucketOf(final float totalDistance, final float chainReflectivity) {
 		final float delay = totalDistance * DELAY_PER_BLOCK * chainReflectivity;
 		if (delay < 0.5f) return 0;
@@ -59,55 +60,65 @@ public final class Estimator {
 
 	/**
 	 * Estimate the environment for one source. The magnitude comes from the
-	 * cell's measured {@code bucketEnergy} (delivered energy per candidate ray,
-	 * misses included — the unbiased quantity the old tracer averaged over its
-	 * whole ray fan); the stored {@code samples} only distribute it: delay
-	 * crossfade (with the final leg to the listener folded in, like the old
-	 * escape leg), measured final-leg transmission, and HF emphasis.
-	 * {@code directHigh}/{@code directLow} are the latest measured direct-path
-	 * transmissions per band (1.0 until the first direct ray lands): the high
-	 * band drives the lowpass cutoff, the low band the broadband gain — which
-	 * is what lets bass through walls.
+	 * source cell's probe stats (delivered energy per probe ray, misses
+	 * included — open sky reads dry); the field path shapes it: the low band
+	 * carries the reverb energy through the path (bass survives walls), the
+	 * high band drives every cutoff, and the path length shifts the delay
+	 * crossfade so a sound down a winding corridor reverberates late. The
+	 * delay distance blends from the straight-line distance (clear path — a
+	 * Dijkstra polyline overshoots in open air) to the polyline length as the
+	 * path closes up, which is when the polyline is the truth.
+	 *
+	 * <p>The diffraction floor survives from the old estimator with a better
+	 * witness: a source around a corner stays audible because the PATH to it
+	 * transmits, losing highs first (cutoff floor lower than gain floor) —
+	 * which is how diffraction actually sounds.
 	 */
-	public static SoundEnvironment estimate(final PathSample[][] samples, final float[] bucketEnergy,
-			final float directHigh, final float directLow,
-			final float listenerX, final float listenerY, final float listenerZ) {
-		if (samples == null) return neutral(directHigh, directLow);
-
-		final float[] sendEnergy = new float[Cell.BUCKETS];
-		final float[] transWeighted = new float[Cell.BUCKETS];
-		final float[] transWeight = new float[Cell.BUCKETS];
-		final float[] visibility = new float[2]; // Σ energy×legTrans, Σ energy
-
-		for (int bucket = 0; bucket < Cell.BUCKETS; bucket++) {
-			accumulateBucket(samples[bucket], bucketEnergy[bucket], listenerX, listenerY, listenerZ,
-					sendEnergy, transWeighted, transWeight, visibility);
+	public static SoundEnvironment estimate(final CellProbe.Stats probe,
+			final float pathHigh, final float pathLow, final float pathDist, final float euclidDist,
+			final float directHigh, final float directLow) {
+		final float directCutoff = Math.max(pathHigh * 0.5f, directHigh);
+		final float directGain = (float) Math.pow(Math.max(pathLow * 0.7f, Math.max(directLow, 0.0f)),
+				DIRECT_GAIN_EXPONENT);
+		if (probe == null) {
+			return new SoundEnvironment(0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 1.0f, 1.0f, 1.0f,
+					directCutoff, directGain, 1.0f);
 		}
 
-		final float[] sendGain = new float[Cell.BUCKETS];
-		final float[] sendCutoff = new float[Cell.BUCKETS];
+		final float effectiveDist = euclidDist + (pathDist - euclidDist) * clamp01(1.0f - pathHigh);
+		final float[] sendEnergy = new float[CellProbe.BUCKETS];
 
-		for (int send = 0; send < Cell.BUCKETS; send++) {
-			final float avgTrans = transWeight[send] > 0.0f ? transWeighted[send] / transWeight[send] : 0.0f;
-			sendCutoff[send] = (float) Math.pow(avgTrans, CUTOFF_EXPONENT[send]);
+		for (int bucket = 0; bucket < CellProbe.BUCKETS; bucket++) {
+			final float energy = probe.energy()[bucket] * pathLow * ENERGY_SCALE;
+			if (energy <= 0.0f) continue;
+			final float reflectivity = Math.max(probe.reflectivity()[bucket], 0.05f);
+			final float delay = (probe.distance()[bucket] + effectiveDist) * DELAY_PER_BLOCK * reflectivity;
+
+			// Crossfade into the four sends: triangular weights around delay
+			// centers 0/1/2, ramp ≥ 2 — inherited from accumulateSend.
+			for (int send = 0; send < CellProbe.BUCKETS; send++) {
+				final float cross = send < 3
+						? 1.0f - clamp01(Math.abs(delay - send))
+						: clamp01(delay - 2.0f);
+				if (cross <= 0.0f) continue;
+				sendEnergy[send] += cross * energy
+						* (float) Math.pow(reflectivity, REFLECTIVITY_EXPONENT[send]);
+			}
+		}
+
+		final float[] sendGain = new float[CellProbe.BUCKETS];
+		final float[] sendCutoff = new float[CellProbe.BUCKETS];
+		for (int send = 0; send < CellProbe.BUCKETS; send++) {
+			sendCutoff[send] = (float) Math.pow(Math.max(pathHigh, 0.0f), CUTOFF_EXPONENT[send]);
 			sendGain[send] = clamp01(sendEnergy[send] * SEND_ENERGY_GAIN[send]);
 		}
 
 		// Inherited late-send noise floor and HF coupling.
 		sendGain[2] = clamp01(sendGain[2] * 1.05f - 0.05f);
 		sendGain[3] = clamp01(sendGain[3] * 1.05f - 0.05f);
-		for (int send = 0; send < Cell.BUCKETS; send++) {
+		for (int send = 0; send < CellProbe.BUCKETS; send++) {
 			sendGain[send] *= (float) Math.pow(sendCutoff[send], 0.1);
 		}
-
-		// Diffraction floor: the energy-weighted fraction of this source's
-		// cached reflection points that reach the listener. A source around a
-		// corner is "visible" from the shared space its reflections live in,
-		// so it stays audible — losing highs first (cutoff floor lower than
-		// gain floor), which is how diffraction actually sounds.
-		final float visible = visibility[1] > 0.0f ? visibility[0] / visibility[1] : 0.0f;
-		final float directCutoff = Math.max(visible * 0.5f, directHigh);
-		final float directGain = (float) Math.pow(Math.max(visible * 0.7f, directLow), DIRECT_GAIN_EXPONENT);
 
 		return new SoundEnvironment(sendGain[0], sendGain[1], sendGain[2], sendGain[3],
 				sendCutoff[0], sendCutoff[1], sendCutoff[2], sendCutoff[3],
@@ -116,8 +127,8 @@ public final class Estimator {
 
 	/**
 	 * Exponential smoothing between worker ticks so parameter changes glide
-	 * instead of snapping (measurement churn — reservoir swaps, bundle rays
-	 * flipping, cell handoffs — must never reach the ears as flicker). Gains
+	 * instead of snapping (measurement churn — probe rounds, path re-routes,
+	 * bundle rays flipping — must never reach the ears as flicker). Gains
 	 * interpolate linearly; cutoffs in log space, because frequency perception
 	 * is octaves.
 	 */
@@ -161,60 +172,6 @@ public final class Estimator {
 				|| Math.abs(a.sendCutoff3 - b.sendCutoff3) > AUDIBLE_DELTA
 				|| Math.abs(a.directCutoff - b.directCutoff) > AUDIBLE_DELTA
 				|| Math.abs(a.directGain - b.directGain) > AUDIBLE_DELTA;
-	}
-
-	// One bucket's contribution: the measured energy density is split across
-	// the stored samples by their relative strength, then each share is
-	// crossfaded into the four sends by its delay, inherited from
-	// accumulateSend: triangular weights around delay centers 0/1/2, ramp ≥ 2.
-	// The final leg to the listener counts toward the delay: a short ground
-	// bounce heard from far away is a late reflection, not an early one.
-	private static void accumulateBucket(final PathSample[] bucket, final float bucketEnergy,
-			final float listenerX, final float listenerY, final float listenerZ,
-			final float[] sendEnergy, final float[] transWeighted, final float[] transWeight,
-			final float[] visibility) {
-		if (bucketEnergy <= 0.0f) return;
-
-		float bucketWeight = 0.0f;
-		for (final PathSample sample : bucket) {
-			if (sample != null) bucketWeight += Math.max(sample.energy(), 1e-6f);
-		}
-		if (bucketWeight <= 0.0f) return;
-
-		for (final PathSample sample : bucket) {
-			if (sample == null) continue;
-			final float dx = sample.lastHitX() - listenerX;
-			final float dy = sample.lastHitY() - listenerY;
-			final float dz = sample.lastHitZ() - listenerZ;
-			final float legDistance = (float) Math.sqrt(dx * dx + dy * dy + dz * dz);
-			final float pathDistance = Math.max(sample.totalDistance(), 0.0f) + legDistance;
-			final float delay = pathDistance * DELAY_PER_BLOCK * sample.chainReflectivity();
-
-			// Low band carries the reflected energy (bass survives the final
-			// leg better); the high band shapes the cutoffs below.
-			final float share = Math.max(sample.energy(), 1e-6f) / bucketWeight;
-			final float energy = bucketEnergy * share * sample.legTransmissionLow() * ENERGY_SCALE;
-			visibility[0] += energy * sample.legTransmission();
-			visibility[1] += energy;
-
-			for (int send = 0; send < Cell.BUCKETS; send++) {
-				final float cross = send < 3
-						? 1.0f - clamp01(Math.abs(delay - send))
-						: clamp01(delay - 2.0f);
-				if (cross <= 0.0f) continue;
-				final float emphasized = energy
-						* (float) Math.pow(Math.max(sample.chainReflectivity(), 0.05f), REFLECTIVITY_EXPONENT[send]);
-				sendEnergy[send] += cross * emphasized;
-				transWeighted[send] += cross * energy * sample.legTransmission();
-				transWeight[send] += cross * energy;
-			}
-		}
-	}
-
-	private static SoundEnvironment neutral(final float directHigh, final float directLow) {
-		final float directGain = (float) Math.pow(Math.max(directLow, 0.0f), DIRECT_GAIN_EXPONENT);
-		return new SoundEnvironment(0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 1.0f, 1.0f, 1.0f,
-				Math.max(directHigh, 0.0f), directGain, 1.0f);
 	}
 
 	private static float clamp01(final float value) {

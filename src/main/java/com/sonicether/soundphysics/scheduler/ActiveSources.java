@@ -1,7 +1,7 @@
 package com.sonicether.soundphysics.scheduler;
 
 import com.sonicether.soundphysics.SoundEnvironment;
-import com.sonicether.soundphysics.restir.CellKeys;
+import com.sonicether.soundphysics.field.CellKeys;
 
 import java.util.Collection;
 import java.util.UUID;
@@ -28,6 +28,10 @@ public final class ActiveSources {
 		public volatile boolean directOnly;
 		public volatile float directTransmission = 1.0f;
 		public volatile float directTransmissionLow = 1.0f;
+		// Validated path-polyline transmission (worker-measured); NaN = no
+		// validation this tick, fall back to the field's edge product.
+		public volatile float pathTransHigh = Float.NaN;
+		public volatile float pathTransLow = Float.NaN;
 		// Speed-of-sound start delay: paused at play, resumed by the worker.
 		public volatile long resumeAtNanos;
 		// Worker-only.
@@ -50,6 +54,8 @@ public final class ActiveSources {
 		public volatile double z;
 		public volatile float directTransmission = 1.0f;
 		public volatile float directTransmissionLow = 1.0f;
+		public volatile float pathTransHigh = Float.NaN;
+		public volatile float pathTransLow = Float.NaN;
 		// Worker-only.
 		SoundEnvironment lastApplied;
 		SoundEnvironment smoothed;
@@ -80,6 +86,8 @@ public final class ActiveSources {
 		source.directOnly = directOnly;
 		source.directTransmission = 1.0f;
 		source.directTransmissionLow = 1.0f;
+		source.pathTransHigh = Float.NaN;
+		source.pathTransLow = Float.NaN;
 		source.resumeAtNanos = 0L;
 		source.lastApplied = null;
 		source.smoothed = null;

@@ -257,11 +257,28 @@ void marchRay(uint idx, Ray ray) {
             vec4(trans.x, 0.0, trans.y, uintBitsToFloat(FLAG_VALID)));
 }
 
+// True when the point sits inside an occupied voxel. Offset endpoints of the
+// diffraction bundle must pass through actual air: an endpoint inside a solid
+// voxel earns that voxel a grace exemption, which is a free pass through any
+// thin blocker hugging the ray — a closed door read as open whenever the
+// listener stood at it.
+bool solidAt(vec3 p) {
+    ivec3 v = ivec3(floor(p));
+    if (!inWindow(v)) return false;
+    if (sectionEmpty(v)) return false;
+    return (texelAt(v) & 0x3Fu) != 0u;
+}
+
+vec2 offsetMarch(vec3 origin, vec3 target) {
+    if (solidAt(origin) || solidAt(target)) return vec2(0.0);
+    return marchTrans(origin, target, true);
+}
+
 // Direct occlusion for one playing source: a nine-ray diffraction bundle.
 // Offsets are perpendicular to the ray, around the listener AND around the
 // source (a blocker hugging either endpoint needs the offset on its side to
-// clear it). Offset origins landing inside an adjacent block get that voxel
-// as their grace — the sound effectively radiates from the whole obstruction.
+// clear it). Offset endpoints landing inside solid voxels contribute nothing —
+// diffraction bends through air gaps, not through matter.
 void directRay(uint idx, Ray ray) {
     vec3 origin = ray.originType.xyz;
     vec3 target = ray.dirParam.xyz;
@@ -278,14 +295,14 @@ void directRay(uint idx, Ray ray) {
         vec3 offsetB = vertical * DIFFRACTION_OFFSET;
 
         vec2 center = marchTrans(origin, target, true);
-        vec2 best = marchTrans(origin, target + offsetA, true);
-        best = max(best, marchTrans(origin, target - offsetA, true));
-        best = max(best, marchTrans(origin, target + offsetB, true));
-        best = max(best, marchTrans(origin, target - offsetB, true));
-        best = max(best, marchTrans(origin + offsetA, target, true));
-        best = max(best, marchTrans(origin - offsetA, target, true));
-        best = max(best, marchTrans(origin + offsetB, target, true));
-        best = max(best, marchTrans(origin - offsetB, target, true));
+        vec2 best = offsetMarch(origin, target + offsetA);
+        best = max(best, offsetMarch(origin, target - offsetA));
+        best = max(best, offsetMarch(origin, target + offsetB));
+        best = max(best, offsetMarch(origin, target - offsetB));
+        best = max(best, offsetMarch(origin + offsetA, target));
+        best = max(best, offsetMarch(origin - offsetA, target));
+        best = max(best, offsetMarch(origin + offsetB, target));
+        best = max(best, offsetMarch(origin - offsetB, target));
 
         trans = max(center, best * DIFFRACTION_DISCOUNT);
     }
