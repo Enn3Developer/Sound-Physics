@@ -183,7 +183,11 @@ public final class SectionCache {
 					if (blockId == 0) continue;
 					final byte material = materials.idFor(blockId);
 					if (material == Materials.AIR) continue;
-					out[(z * 16 + y) * 16 + x] = (byte) (material | occupancyOf(blockId, meta, x, y, z) << 6);
+					final byte shape = materials.shapeFor(blockId);
+					// Open doors, trapdoors and fence gates are acoustically air.
+					if ((shape == Materials.SHAPE_DOOR || shape == Materials.SHAPE_GATE)
+							&& meta != null && isOpen(shape, meta, x, y, z)) continue;
+					out[(z * 16 + y) * 16 + x] = (byte) (material | occupancyOf(shape, meta, x, y, z) << 6);
 					allAir = false;
 				}
 			}
@@ -191,12 +195,26 @@ public final class SectionCache {
 		return allAir ? ALL_AIR : out;
 	}
 
-	private int occupancyOf(final int blockId, final NibbleArray meta, final int x, final int y, final int z) {
-		final byte shape = materials.shapeFor(blockId);
-		if (shape == Materials.SHAPE_FULL || meta == null) return 0;
-		final int blockMeta = meta.get(x, y, z);
-		if (shape == Materials.SHAPE_SLAB) return (blockMeta & 8) != 0 ? Materials.OCC_TOP : Materials.OCC_BOTTOM;
-		return (blockMeta & 4) != 0 ? Materials.OCC_TOP : Materials.OCC_BOTTOM;
+	private static int occupancyOf(final byte shape, final NibbleArray meta, final int x, final int y, final int z) {
+		if (meta == null) return 0;
+		if (shape == Materials.SHAPE_SLAB) {
+			return (meta.get(x, y, z) & 8) != 0 ? Materials.OCC_TOP : Materials.OCC_BOTTOM;
+		}
+		if (shape == Materials.SHAPE_STAIR) {
+			return (meta.get(x, y, z) & 4) != 0 ? Materials.OCC_TOP : Materials.OCC_BOTTOM;
+		}
+		return 0;
+	}
+
+	// Openables put "open" in meta bit 4; a door's UPPER half (meta bit 8)
+	// carries hinge data instead, so the open bit is read one block below.
+	private static boolean isOpen(final byte shape, final NibbleArray meta, final int x, final int y, final int z) {
+		int blockMeta = meta.get(x, y, z);
+		if (shape == Materials.SHAPE_DOOR && (blockMeta & 8) != 0) {
+			if (y == 0) return false; // lower half lives in the section below; assume closed
+			blockMeta = meta.get(x, y - 1, z);
+		}
+		return (blockMeta & 4) != 0;
 	}
 
 	private boolean withinRadius(final long key) {

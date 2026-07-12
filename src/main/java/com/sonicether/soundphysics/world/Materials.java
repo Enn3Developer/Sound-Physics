@@ -37,6 +37,11 @@ public final class Materials {
 	public static final byte SHAPE_FULL = 0;
 	public static final byte SHAPE_SLAB = 1; // meta bit 8 = top half
 	public static final byte SHAPE_STAIR = 2; // meta bit 4 = upside-down (top half)
+	// Openables: acoustically air while open (meta bit 4). Doors keep the open
+	// bit in the LOWER half's metadata; the upper half (meta bit 8) must look
+	// one block down.
+	public static final byte SHAPE_DOOR = 3;
+	public static final byte SHAPE_GATE = 4; // trapdoors and fence gates
 
 	public static final int OCC_BOTTOM = 1;
 	public static final int OCC_TOP = 2;
@@ -50,7 +55,10 @@ public final class Materials {
 			0.10f, // ground
 			0.55f, // plant
 			0.03f, // metal
-			0.50f, // glass
+			// Glass is acoustically HARD: it reflects (below the chain reflect
+			// threshold) and a closed window audibly blocks sound. 0.5 made
+			// panes indistinguishable from open air.
+			0.20f, // glass
 			0.30f, // cloth
 			0.10f, // sand
 			0.40f, // snow
@@ -84,6 +92,9 @@ public final class Materials {
 	private static byte shapeOf(final Block block) {
 		if (block instanceof net.minecraft.block.BlockSlab) return SHAPE_SLAB;
 		if (block instanceof net.minecraft.block.BlockStairs) return SHAPE_STAIR;
+		if (block instanceof net.minecraft.block.BlockDoor) return SHAPE_DOOR;
+		if (block instanceof net.minecraft.block.BlockTrapDoor
+				|| block instanceof net.minecraft.block.BlockFenceGate) return SHAPE_GATE;
 		return SHAPE_FULL;
 	}
 

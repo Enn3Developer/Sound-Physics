@@ -64,6 +64,7 @@ public final class AudioWorker extends Thread {
 	private final ActiveSources sources;
 	private final ApplyQueue applyQueue;
 	private final EfxPipeline gamePipeline;
+	private final RainProbes rainProbes;
 
 	private final VoxelStore voxels = new VoxelStore();
 	private final TracePipeline pipeline = new TracePipeline();
@@ -97,7 +98,7 @@ public final class AudioWorker extends Thread {
 
 	public AudioWorker(final TraceContext context, final SectionCache sectionCache, final ReservoirStore store,
 			final ConnectivityCache connectivity, final ActiveSources sources, final ApplyQueue applyQueue,
-			final EfxPipeline gamePipeline) {
+			final EfxPipeline gamePipeline, final RainProbes rainProbes) {
 		super("SoundPhysics worker");
 		setDaemon(true);
 		this.context = context;
@@ -107,6 +108,7 @@ public final class AudioWorker extends Thread {
 		this.sources = sources;
 		this.applyQueue = applyQueue;
 		this.gamePipeline = gamePipeline;
+		this.rainProbes = rainProbes;
 	}
 
 	public void markPaletteDirty() {
@@ -182,7 +184,10 @@ public final class AudioWorker extends Thread {
 		composeBatch(listenerX, listenerY, listenerZ);
 		if (batch.size() > 0) {
 			pipeline.dispatch(batch, voxels);
-			if (pipeline.awaitResults(100_000_000L)) consumeResults(nowMillis);
+			if (pipeline.awaitResults(100_000_000L)) {
+				consumeResults(nowMillis);
+				rainProbes.selectBest(listenerX, listenerY, listenerZ);
+			}
 		}
 
 		// 2b. Gated neighbor merges for hot cells (spatial reuse).
@@ -237,6 +242,7 @@ public final class AudioWorker extends Thread {
 		hotCells.clear();
 		hotKeys.clear();
 		for (final ActiveSources.GameSource source : sources.gameSources()) {
+			if (source.directOnly) continue; // rain: no reverb cell, direct rays only
 			addHotCell(source.cellKey(), nowMillis, source.x, source.y, source.z);
 		}
 		for (final ActiveSources.Speaker speaker : sources.speakerSources()) {
@@ -279,12 +285,19 @@ public final class AudioWorker extends Thread {
 		// Direct rays: one per playing source, never through the reservoir.
 		for (final ActiveSources.GameSource source : sources.gameSources()) {
 			if (batch.full()) break;
-			batch.addDirect(source.x, source.y, source.z, listenerX, listenerY, listenerZ, source);
+			batch.addDirect(source.x, source.y, source.z, listenerX, listenerY, listenerZ, source, 0);
 		}
 		for (final ActiveSources.Speaker speaker : sources.speakerSources()) {
 			if (batch.full()) break;
 			batch.addDirect((float) speaker.x, (float) speaker.y, (float) speaker.z,
-					listenerX, listenerY, listenerZ, speaker);
+					listenerX, listenerY, listenerZ, speaker, 0);
+		}
+		// Rain anchor probes: candidate landing columns, scored by measured
+		// transmission so an open door beats a nearer roof.
+		final float[] probes = rainProbes.beginMeasure();
+		for (int i = 0; i * 3 + 2 < probes.length && !batch.full(); i++) {
+			batch.addDirect(probes[i * 3], probes[i * 3 + 1], probes[i * 3 + 2],
+					listenerX, listenerY, listenerZ, rainProbes, i);
 		}
 		final int directCount = batch.size();
 
@@ -432,8 +445,21 @@ public final class AudioWorker extends Thread {
 
 	// --- Stage 2: consume the completed batch ---------------------------------
 
+	// Per-tick escape statistics from candidate rays: how "outside" the active
+	// acoustic space is, and where the openings are (mean escape direction).
+	private int escapeRays;
+	private int escapeCount;
+	private float escapeDirX;
+	private float escapeDirY;
+	private float escapeDirZ;
+
 	private void consumeResults(final long nowMillis) {
 		candidateStats.clear();
+		escapeRays = 0;
+		escapeCount = 0;
+		escapeDirX = 0.0f;
+		escapeDirY = 0.0f;
+		escapeDirZ = 0.0f;
 		for (int ray = 0; ray < batch.size(); ray++) {
 			switch (batch.kind[ray]) {
 				case Batch.KIND_CANDIDATE, Batch.KIND_PREFETCH -> consumeCandidate(ray);
@@ -455,6 +481,14 @@ public final class AudioWorker extends Thread {
 		final Cell cell = (Cell) batch.tag[ray];
 		final float[] stats = candidateStats.computeIfAbsent(cell, c -> new float[5]);
 		stats[4]++;
+		escapeRays++;
+		if ((pipeline.resultFlags(pipeline.resultBase(ray, 0)) & TracePipeline.FLAG_VALID) == 0) {
+			// No first bounce at all: this direction leads straight to open sky.
+			escapeCount++;
+			escapeDirX += batch.seedX[ray];
+			escapeDirY += batch.seedY[ray];
+			escapeDirZ += batch.seedZ[ray];
+		}
 		for (int prefix = 0; prefix < TracePipeline.RESULTS_PER_RAY; prefix++) {
 			final int base = pipeline.resultBase(ray, prefix);
 			if ((pipeline.resultFlags(base) & TracePipeline.FLAG_VALID) == 0) break;
@@ -521,6 +555,8 @@ public final class AudioWorker extends Thread {
 		} else if (batch.tag[ray] instanceof ActiveSources.Speaker speaker) {
 			speaker.directTransmission = high;
 			speaker.directTransmissionLow = low;
+		} else if (batch.tag[ray] == rainProbes) {
+			rainProbes.report(batch.meta[ray], high, low);
 		}
 	}
 
@@ -572,28 +608,42 @@ public final class AudioWorker extends Thread {
 
 	// --- Stage 3: estimate + apply -------------------------------------------
 
+	// Exponential smoothing rate for audible parameters (per second): fast
+	// enough to track walking through a doorway, slow enough that measurement
+	// churn never reaches the ears as flicker.
+	private static final float SMOOTH_RATE = 8.0f;
+
+	private float smoothingAlpha() {
+		return 1.0f - (float) Math.exp(-SMOOTH_RATE / Math.max(1, Config.workerRateHz));
+	}
+
 	private void estimateAndApply(final float listenerX, final float listenerY, final float listenerZ) {
+		final float alpha = smoothingAlpha();
 		for (final ActiveSources.GameSource source : sources.gameSources()) {
-			final Cell cell = store.get(source.cellKey());
-			final SoundEnvironment env = cell == null
+			// A direct-only source must not borrow the reverb of whatever cell
+			// happens to share its position.
+			final Cell cell = source.directOnly ? null : store.get(source.cellKey());
+			final SoundEnvironment target = cell == null
 					? Estimator.estimate(null, null, source.directTransmission, source.directTransmissionLow,
 							listenerX, listenerY, listenerZ)
 					: Estimator.estimate(cell.samples(), cell.bucketEnergy(), source.directTransmission,
 							source.directTransmissionLow, listenerX, listenerY, listenerZ);
-			if (!Estimator.audiblyDiffers(source.lastApplied, env)) continue;
-			source.lastApplied = env;
-			applyQueue.push(source.sourceId, env);
+			source.smoothed = Estimator.smooth(source.smoothed, target, alpha);
+			if (!Estimator.audiblyDiffers(source.lastApplied, source.smoothed)) continue;
+			source.lastApplied = source.smoothed;
+			applyQueue.push(source.sourceId, source.smoothed);
 		}
 		for (final ActiveSources.Speaker speaker : sources.speakerSources()) {
 			final Cell cell = store.get(speaker.cellKey());
-			final SoundEnvironment env = cell == null
+			final SoundEnvironment target = cell == null
 					? Estimator.estimate(null, null, speaker.directTransmission, speaker.directTransmissionLow,
 							listenerX, listenerY, listenerZ)
 					: Estimator.estimate(cell.samples(), cell.bucketEnergy(), speaker.directTransmission,
 							speaker.directTransmissionLow, listenerX, listenerY, listenerZ);
-			if (!Estimator.audiblyDiffers(speaker.lastApplied, env)) continue;
-			speaker.lastApplied = env;
-			voiceSink.accept(speaker.id, env);
+			speaker.smoothed = Estimator.smooth(speaker.smoothed, target, alpha);
+			if (!Estimator.audiblyDiffers(speaker.lastApplied, speaker.smoothed)) continue;
+			speaker.lastApplied = speaker.smoothed;
+			voiceSink.accept(speaker.id, speaker.smoothed);
 		}
 	}
 
@@ -604,6 +654,8 @@ public final class AudioWorker extends Thread {
 
 	private final float[] dynPan = new float[12];
 	private final float[] dynHf = new float[4];
+	private final float[] smoothedDynPan = new float[12];
+	private final float[] smoothedDynHf = { 1.0f, 1.0f, 1.0f, 1.0f };
 	private final float[] lastDynPan = new float[12];
 	private final float[] lastDynHf = { 1.0f, 1.0f, 1.0f, 1.0f };
 
@@ -673,15 +725,43 @@ public final class AudioWorker extends Thread {
 			dynHf[bucket] = 0.35f + 0.9f * (sumRefl / sumW);
 		}
 
-		float delta = 0.0f;
-		for (int i = 0; i < 12; i++) delta = Math.max(delta, Math.abs(dynPan[i] - lastDynPan[i]));
-		for (int i = 0; i < 4; i++) delta = Math.max(delta, Math.abs(dynHf[i] - lastDynHf[i]));
-		if (delta < 0.05f) return;
+		// Openings pull the late reverb: in a half-enclosed space (weight peaks
+		// at 50% open, zero when sealed or fully outdoors) the tail leans
+		// toward where the rays escape — the door, the cave mouth.
+		if (escapeRays > 0 && escapeCount > 0) {
+			final float ratio = (float) escapeCount / escapeRays;
+			final float openingWeight = 4.0f * ratio * (1.0f - ratio) * 0.4f;
+			final float len = (float) Math.sqrt(escapeDirX * escapeDirX + escapeDirY * escapeDirY
+					+ escapeDirZ * escapeDirZ);
+			if (len > 1e-4f && openingWeight > 0.01f) {
+				final float ex = escapeDirX / len;
+				final float ey = escapeDirY / len;
+				final float ez = escapeDirZ / len;
+				for (int bucket = 2; bucket < Cell.BUCKETS; bucket++) {
+					dynPan[bucket * 3] += (ex * rightX + ez * rightZ) * openingWeight;
+					dynPan[bucket * 3 + 1] += (ex * ux + ey * uy + ez * uz) * openingWeight;
+					dynPan[bucket * 3 + 2] += -(ex * fx + ey * fy + ez * fz) * openingWeight;
+				}
+			}
+			Stats.INSTANCE.escapeRatio = ratio;
+		}
+		for (int i = 6; i < 12; i++) dynPan[i] = Math.max(-0.85f, Math.min(0.85f, dynPan[i]));
 
-		System.arraycopy(dynPan, 0, lastDynPan, 0, 12);
-		System.arraycopy(dynHf, 0, lastDynHf, 0, 4);
-		gamePipeline.updateReverbDynamics(dynPan, dynHf);
-		DynamicsState.publish(dynPan, dynHf);
+		// Same smoothing philosophy as the per-source envs: the room's
+		// character glides, it never snaps.
+		final float alpha = smoothingAlpha();
+		for (int i = 0; i < 12; i++) smoothedDynPan[i] += alpha * (dynPan[i] - smoothedDynPan[i]);
+		for (int i = 0; i < 4; i++) smoothedDynHf[i] += alpha * (dynHf[i] - smoothedDynHf[i]);
+
+		float delta = 0.0f;
+		for (int i = 0; i < 12; i++) delta = Math.max(delta, Math.abs(smoothedDynPan[i] - lastDynPan[i]));
+		for (int i = 0; i < 4; i++) delta = Math.max(delta, Math.abs(smoothedDynHf[i] - lastDynHf[i]));
+		if (delta < 0.02f) return;
+
+		System.arraycopy(smoothedDynPan, 0, lastDynPan, 0, 12);
+		System.arraycopy(smoothedDynHf, 0, lastDynHf, 0, 4);
+		gamePipeline.updateReverbDynamics(smoothedDynPan, smoothedDynHf);
+		DynamicsState.publish(smoothedDynPan, smoothedDynHf);
 	}
 
 	private void publishStats() {

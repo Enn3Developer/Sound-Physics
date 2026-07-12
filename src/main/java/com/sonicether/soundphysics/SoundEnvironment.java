@@ -2,9 +2,8 @@ package com.sonicether.soundphysics;
 
 /**
  * Immutable result of an environment evaluation: the four reverb send
- * gain/cutoff pairs, the direct path filter values, the air absorption
- * factor and the echo steal amount that get applied to an AL source by
- * {@code EfxPipeline#apply}.
+ * gain/cutoff pairs, the direct path filter values and the air absorption
+ * factor that get applied to an AL source by {@code EfxPipeline#apply}.
  */
 public final class SoundEnvironment {
 
@@ -22,14 +21,11 @@ public final class SoundEnvironment {
 	public final float directCutoff;
 	public final float directGain;
 	public final float airAbsorptionFactor;
-	// > 0: send 3 routes to the echo slot instead of the long reverb —
-	// the open-space "one distant wall" signature.
-	public final float echoSend;
 
 	public SoundEnvironment(final float sendGain0, final float sendGain1, final float sendGain2,
 			final float sendGain3, final float sendCutoff0, final float sendCutoff1, final float sendCutoff2,
 			final float sendCutoff3, final float directCutoff, final float directGain,
-			final float airAbsorptionFactor, final float echoSend) {
+			final float airAbsorptionFactor) {
 		this.sendGain0 = sendGain0;
 		this.sendGain1 = sendGain1;
 		this.sendGain2 = sendGain2;
@@ -41,15 +37,6 @@ public final class SoundEnvironment {
 		this.directCutoff = directCutoff;
 		this.directGain = directGain;
 		this.airAbsorptionFactor = airAbsorptionFactor;
-		this.echoSend = echoSend;
-	}
-
-	public SoundEnvironment(final float sendGain0, final float sendGain1, final float sendGain2,
-			final float sendGain3, final float sendCutoff0, final float sendCutoff1, final float sendCutoff2,
-			final float sendCutoff3, final float directCutoff, final float directGain,
-			final float airAbsorptionFactor) {
-		this(sendGain0, sendGain1, sendGain2, sendGain3, sendCutoff0, sendCutoff1, sendCutoff2, sendCutoff3,
-				directCutoff, directGain, airAbsorptionFactor, 0.0f);
 	}
 
 	/**

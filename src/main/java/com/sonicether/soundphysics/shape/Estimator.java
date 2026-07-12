@@ -36,13 +36,14 @@ public final class Estimator {
 	// multiplied gains by bounceReflectivityRatio^{-,1,3,4}).
 	private static final float[] REFLECTIVITY_EXPONENT = { 0.0f, 1.0f, 3.0f, 4.0f };
 
+	// Loudness curve for the direct path: gain = low-band transmission ^ this.
+	// The old 0.1 exponent turned ANY partial transmission into near-full
+	// volume (0.7 → 0.97), leaving all occlusion to the HF cutoff — a closed
+	// window sounded like an open door. 0.3 lets volume participate.
+	private static final float DIRECT_GAIN_EXPONENT = 0.3f;
+
 	// Hysteresis: params are emitted only when the change is audible.
 	private static final float AUDIBLE_DELTA = 0.01f;
-
-	// Echo signature: a strong long-delay return with nothing early — one
-	// distant wall across open space. Send 3 then steals the echo slot.
-	private static final float ECHO_MIN_LATE = 0.25f;
-	private static final float ECHO_MAX_EARLY = 0.12f;
 
 	private Estimator() {
 	}
@@ -76,19 +77,18 @@ public final class Estimator {
 		final float[] sendEnergy = new float[Cell.BUCKETS];
 		final float[] transWeighted = new float[Cell.BUCKETS];
 		final float[] transWeight = new float[Cell.BUCKETS];
+		final float[] visibility = new float[2]; // Σ energy×legTrans, Σ energy
 
 		for (int bucket = 0; bucket < Cell.BUCKETS; bucket++) {
 			accumulateBucket(samples[bucket], bucketEnergy[bucket], listenerX, listenerY, listenerZ,
-					sendEnergy, transWeighted, transWeight);
+					sendEnergy, transWeighted, transWeight, visibility);
 		}
 
 		final float[] sendGain = new float[Cell.BUCKETS];
 		final float[] sendCutoff = new float[Cell.BUCKETS];
-		float transSum = 0.0f;
 
 		for (int send = 0; send < Cell.BUCKETS; send++) {
 			final float avgTrans = transWeight[send] > 0.0f ? transWeighted[send] / transWeight[send] : 0.0f;
-			transSum += avgTrans;
 			sendCutoff[send] = (float) Math.pow(avgTrans, CUTOFF_EXPONENT[send]);
 			sendGain[send] = clamp01(sendEnergy[send] * SEND_ENERGY_GAIN[send]);
 		}
@@ -100,18 +100,52 @@ public final class Estimator {
 			sendGain[send] *= (float) Math.pow(sendCutoff[send], 0.1);
 		}
 
-		// Directionality preservation, inherited: when reflected paths reach the
-		// listener freely (the shared-airspace analog), let some filtered direct
-		// signal through even if the straight line is blocked.
-		final float opennessFloor = (float) Math.pow(transSum * 0.25f, 0.5) * 0.2f;
-		final float directCutoff = Math.max(opennessFloor, directHigh);
-		final float directGain = (float) Math.pow(Math.max(opennessFloor, directLow), 0.1);
-
-		final boolean echoing = sendGain[3] > ECHO_MIN_LATE && sendGain[0] + sendGain[1] < ECHO_MAX_EARLY;
+		// Diffraction floor: the energy-weighted fraction of this source's
+		// cached reflection points that reach the listener. A source around a
+		// corner is "visible" from the shared space its reflections live in,
+		// so it stays audible — losing highs first (cutoff floor lower than
+		// gain floor), which is how diffraction actually sounds.
+		final float visible = visibility[1] > 0.0f ? visibility[0] / visibility[1] : 0.0f;
+		final float directCutoff = Math.max(visible * 0.5f, directHigh);
+		final float directGain = (float) Math.pow(Math.max(visible * 0.7f, directLow), DIRECT_GAIN_EXPONENT);
 
 		return new SoundEnvironment(sendGain[0], sendGain[1], sendGain[2], sendGain[3],
 				sendCutoff[0], sendCutoff[1], sendCutoff[2], sendCutoff[3],
-				directCutoff, directGain, 1.0f, echoing ? sendGain[3] : 0.0f);
+				directCutoff, directGain, 1.0f);
+	}
+
+	/**
+	 * Exponential smoothing between worker ticks so parameter changes glide
+	 * instead of snapping (measurement churn — reservoir swaps, bundle rays
+	 * flipping, cell handoffs — must never reach the ears as flicker). Gains
+	 * interpolate linearly; cutoffs in log space, because frequency perception
+	 * is octaves.
+	 */
+	public static SoundEnvironment smooth(final SoundEnvironment current, final SoundEnvironment target,
+			final float alpha) {
+		if (current == null) return target;
+		return new SoundEnvironment(
+				lerp(current.sendGain0, target.sendGain0, alpha),
+				lerp(current.sendGain1, target.sendGain1, alpha),
+				lerp(current.sendGain2, target.sendGain2, alpha),
+				lerp(current.sendGain3, target.sendGain3, alpha),
+				logLerp(current.sendCutoff0, target.sendCutoff0, alpha),
+				logLerp(current.sendCutoff1, target.sendCutoff1, alpha),
+				logLerp(current.sendCutoff2, target.sendCutoff2, alpha),
+				logLerp(current.sendCutoff3, target.sendCutoff3, alpha),
+				logLerp(current.directCutoff, target.directCutoff, alpha),
+				lerp(current.directGain, target.directGain, alpha),
+				lerp(current.airAbsorptionFactor, target.airAbsorptionFactor, alpha));
+	}
+
+	private static float lerp(final float a, final float b, final float t) {
+		return a + (b - a) * t;
+	}
+
+	private static float logLerp(final float a, final float b, final float t) {
+		final float logA = (float) Math.log(Math.max(a, 1e-3f));
+		final float logB = (float) Math.log(Math.max(b, 1e-3f));
+		return (float) Math.exp(logA + (logB - logA) * t);
 	}
 
 	/** Hysteresis: emit only when the change is audible. */
@@ -126,8 +160,7 @@ public final class Estimator {
 				|| Math.abs(a.sendCutoff2 - b.sendCutoff2) > AUDIBLE_DELTA
 				|| Math.abs(a.sendCutoff3 - b.sendCutoff3) > AUDIBLE_DELTA
 				|| Math.abs(a.directCutoff - b.directCutoff) > AUDIBLE_DELTA
-				|| Math.abs(a.directGain - b.directGain) > AUDIBLE_DELTA
-				|| Math.abs(a.echoSend - b.echoSend) > AUDIBLE_DELTA;
+				|| Math.abs(a.directGain - b.directGain) > AUDIBLE_DELTA;
 	}
 
 	// One bucket's contribution: the measured energy density is split across
@@ -138,7 +171,8 @@ public final class Estimator {
 	// bounce heard from far away is a late reflection, not an early one.
 	private static void accumulateBucket(final PathSample[] bucket, final float bucketEnergy,
 			final float listenerX, final float listenerY, final float listenerZ,
-			final float[] sendEnergy, final float[] transWeighted, final float[] transWeight) {
+			final float[] sendEnergy, final float[] transWeighted, final float[] transWeight,
+			final float[] visibility) {
 		if (bucketEnergy <= 0.0f) return;
 
 		float bucketWeight = 0.0f;
@@ -160,6 +194,8 @@ public final class Estimator {
 			// leg better); the high band shapes the cutoffs below.
 			final float share = Math.max(sample.energy(), 1e-6f) / bucketWeight;
 			final float energy = bucketEnergy * share * sample.legTransmissionLow() * ENERGY_SCALE;
+			visibility[0] += energy * sample.legTransmission();
+			visibility[1] += energy;
 
 			for (int send = 0; send < Cell.BUCKETS; send++) {
 				final float cross = send < 3
@@ -176,7 +212,7 @@ public final class Estimator {
 	}
 
 	private static SoundEnvironment neutral(final float directHigh, final float directLow) {
-		final float directGain = (float) Math.pow(Math.max(directLow, 0.0f), 0.1);
+		final float directGain = (float) Math.pow(Math.max(directLow, 0.0f), DIRECT_GAIN_EXPONENT);
 		return new SoundEnvironment(0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 1.0f, 1.0f, 1.0f,
 				Math.max(directHigh, 0.0f), directGain, 1.0f);
 	}

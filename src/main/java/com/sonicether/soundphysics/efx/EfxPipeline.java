@@ -38,11 +38,6 @@ public class EfxPipeline {
 	private int sendFilter1;
 	private int sendFilter2;
 	private int sendFilter3;
-	// Fifth slot: AL_EFFECT_ECHO. Send 3 steals it when the environment shows
-	// the "one distant wall across open space" signature (env.echoSend > 0).
-	// EFX caps echo delay at 207 ms — a slapback train, not a canyon repeat.
-	private int echoSlot;
-	private int echoEffect;
 
 	// Base (preset) decay HF ratios, modulated by measured surface brightness.
 	private static final float[] PRESET_DECAY_HF = { 0.6f, 0.7f, 0.7f, 0.7f };
@@ -122,17 +117,6 @@ public class EfxPipeline {
 		sendFilter3 = genLowpassFilter();
 		SoundPhysics.checkErrorLog("Error creating lowpass filters!");
 
-		echoSlot = genAuxSlot();
-		echoEffect = EXTEfx.alGenEffects();
-		EXTEfx.alEffecti(echoEffect, EXTEfx.AL_EFFECT_TYPE, EXTEfx.AL_EFFECT_ECHO);
-		EXTEfx.alEffectf(echoEffect, EXTEfx.AL_ECHO_DELAY, 0.207f);
-		EXTEfx.alEffectf(echoEffect, EXTEfx.AL_ECHO_LRDELAY, 0.207f);
-		EXTEfx.alEffectf(echoEffect, EXTEfx.AL_ECHO_DAMPING, 0.6f);
-		EXTEfx.alEffectf(echoEffect, EXTEfx.AL_ECHO_FEEDBACK, 0.45f);
-		EXTEfx.alEffectf(echoEffect, EXTEfx.AL_ECHO_SPREAD, -0.3f);
-		EXTEfx.alAuxiliaryEffectSloti(echoSlot, EXTEfx.AL_EFFECTSLOT_EFFECT, echoEffect);
-		SoundPhysics.checkErrorLog("Error creating echo effect!");
-
 		return this;
 	}
 
@@ -166,10 +150,10 @@ public class EfxPipeline {
 
 	/**
 	 * Applies a computed environment to an AL source: send filters and slot
-	 * routing for sends 0-3 (send 3 steals the echo slot when the environment
-	 * says so), then the direct lowpass filter, then the air absorption
-	 * factor. Ears-wet and weather-absorption presentation is applied here so
-	 * every path (game play thread, worker, voice audio thread) gets it.
+	 * routing for sends 0-3, then the direct lowpass filter, then the air
+	 * absorption factor. Ears-wet and weather-absorption presentation is
+	 * applied here so every path (game play thread, worker, voice audio
+	 * thread) gets it.
 	 */
 	public void apply(final int sourceID, final SoundEnvironment env) {
 		final boolean earsWet = ListenerState.earsWet;
@@ -182,11 +166,7 @@ public class EfxPipeline {
 		if (activeSends > 0) routeSend(sourceID, 0, auxFXSlot0, sendFilter0, env.sendGain0, env.sendCutoff0 * wetCutoff);
 		if (activeSends > 1) routeSend(sourceID, 1, auxFXSlot1, sendFilter1, env.sendGain1, env.sendCutoff1 * wetCutoff);
 		if (activeSends > 2) routeSend(sourceID, 2, auxFXSlot2, sendFilter2, env.sendGain2, env.sendCutoff2 * wetCutoff);
-		if (activeSends > 3) {
-			final boolean echoing = env.echoSend > 0.0f;
-			routeSend(sourceID, 3, echoing ? echoSlot : auxFXSlot3, sendFilter3,
-					echoing ? env.echoSend : env.sendGain3, env.sendCutoff3 * wetCutoff);
-		}
+		if (activeSends > 3) routeSend(sourceID, 3, auxFXSlot3, sendFilter3, env.sendGain3, env.sendCutoff3 * wetCutoff);
 
 		EXTEfx.alFilterf(directFilter0, EXTEfx.AL_LOWPASS_GAIN, env.directGain);
 		EXTEfx.alFilterf(directFilter0, EXTEfx.AL_LOWPASS_GAINHF, env.directCutoff * wetDirect);

@@ -43,6 +43,9 @@ public final class Stats {
 	public volatile int activeCells;
 	public volatile int storedCells;
 
+	// --- Escape statistics: how "outside" the active space reads.
+	public volatile float escapeRatio;
+
 	// --- Worker health.
 	public volatile int playingSources;
 	public volatile int voiceSpeakers;

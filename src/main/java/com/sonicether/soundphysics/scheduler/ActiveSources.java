@@ -22,12 +22,17 @@ public final class ActiveSources {
 		public volatile float x;
 		public volatile float y;
 		public volatile float z;
+		// Direct occlusion only, no reverb cell (rain: a distributed ambient
+		// source — per-droplet reverb is meaningless, muffling through a roof
+		// is not).
+		public volatile boolean directOnly;
 		public volatile float directTransmission = 1.0f;
 		public volatile float directTransmissionLow = 1.0f;
 		// Speed-of-sound start delay: paused at play, resumed by the worker.
 		public volatile long resumeAtNanos;
 		// Worker-only.
 		SoundEnvironment lastApplied;
+		SoundEnvironment smoothed;
 
 		GameSource(final int sourceId) {
 			this.sourceId = sourceId;
@@ -47,6 +52,7 @@ public final class ActiveSources {
 		public volatile float directTransmissionLow = 1.0f;
 		// Worker-only.
 		SoundEnvironment lastApplied;
+		SoundEnvironment smoothed;
 
 		Speaker(final UUID id) {
 			this.id = id;
@@ -65,15 +71,18 @@ public final class ActiveSources {
 	 * ids are recycled by paulscode, so a (re)play resets the per-source
 	 * measurements; the next worker tick re-measures.
 	 */
-	public GameSource onPlay(final int sourceId, final float x, final float y, final float z) {
+	public GameSource onPlay(final int sourceId, final float x, final float y, final float z,
+			final boolean directOnly) {
 		final GameSource source = game.computeIfAbsent(sourceId, GameSource::new);
 		source.x = x;
 		source.y = y;
 		source.z = z;
+		source.directOnly = directOnly;
 		source.directTransmission = 1.0f;
 		source.directTransmissionLow = 1.0f;
 		source.resumeAtNanos = 0L;
 		source.lastApplied = null;
+		source.smoothed = null;
 		return source;
 	}
 

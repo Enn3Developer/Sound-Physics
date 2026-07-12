@@ -42,8 +42,9 @@ public final class DebugOverlay {
 				stats.raysCandidates, stats.raysRevalidation, stats.raysFinalLegs,
 				stats.raysDirect, stats.raysConnectivity, stats.raysPrefetch, stats.rayBudget));
 		left.add(String.format(Locale.ROOT,
-				"[SoundPhysics] occupancy %.1f %.1f %.1f %.1f",
-				stats.occupancy[0], stats.occupancy[1], stats.occupancy[2], stats.occupancy[3]));
+				"[SoundPhysics] occupancy %.1f %.1f %.1f %.1f | escape %.0f%%",
+				stats.occupancy[0], stats.occupancy[1], stats.occupancy[2], stats.occupancy[3],
+				100.0f * stats.escapeRatio));
 
 		if (--logCountdown > 0) return;
 		logCountdown = LOG_EVERY_TICKS;

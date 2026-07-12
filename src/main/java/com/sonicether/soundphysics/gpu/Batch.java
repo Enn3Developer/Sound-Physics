@@ -108,9 +108,9 @@ public final class Batch {
 	 * endpoint doesn't read as a wall.
 	 */
 	public int addDirect(final float originX, final float originY, final float originZ,
-			final float targetX, final float targetY, final float targetZ, final Object rayTag) {
+			final float targetX, final float targetY, final float targetZ, final Object rayTag, final int rayMeta) {
 		final int slot = writeCommon(originX, originY, originZ, TYPE_DIRECT,
-				targetX, targetY, targetZ, KIND_DIRECT, 0L, rayTag, 0, null);
+				targetX, targetY, targetZ, KIND_DIRECT, 0L, rayTag, rayMeta, null);
 		floats.put(slot * RAY_FLOATS + 7, 1.0f);
 		return slot;
 	}

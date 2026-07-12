@@ -121,14 +121,16 @@ public class SoundPhysics {
 		// so the previous sound's filters must not linger on this source.
 		final Minecraft mc = Minecraft.getMinecraft();
 		final boolean skip = mc.thePlayer == null || mc.theWorld == null || posY <= 0
-				|| soundCat == SoundCategory.RECORDS || soundCat == SoundCategory.MUSIC
-				|| (soundName != null && rainPattern.matcher(soundName).matches());
+				|| soundCat == SoundCategory.RECORDS || soundCat == SoundCategory.MUSIC;
 		if (skip) {
 			engine.applyPassthrough(sourceID);
 			return;
 		}
 
-		engine.onPlaySound(posX, posY, posZ, sourceID);
+		// Rain is a distributed ambient source: direct occlusion only (muffled
+		// through a roof, diffracted through a window), never reverb.
+		final boolean directOnly = soundName != null && rainPattern.matcher(soundName).matches();
+		engine.onPlaySound(posX, posY, posZ, sourceID, directOnly);
 	}
 
 	/**
@@ -174,6 +176,22 @@ public class SoundPhysics {
 	public static double calculateEntitySoundOffset(final Entity entity, final String name) {
 		if (name != null && stepPattern.matcher(name).matches()) return 0;
 		return entity.getEyeHeight();
+	}
+
+	/**
+	 * CALLED BY Mixin INJECTED CODE! Rain-loop placement: anchor the sound to
+	 * the nearest rain-exposed column instead of vanilla's random pick, and
+	 * drop vanilla's above-head volume/pitch hack — muffling is measured here.
+	 */
+	public static void onPlayRainSound(final net.minecraft.world.World world, final double x, final double y,
+			final double z, final String soundName, final float volume, final float pitch,
+			final boolean distanceDelay) {
+		final SoundPhysicsEngine engine = SoundPhysicsEngine.instance();
+		if (engine == null) {
+			world.playSound(x, y, z, soundName, volume, pitch, distanceDelay);
+			return;
+		}
+		engine.playRainSound(world, x, y, z, soundName, distanceDelay);
 	}
 
 	/**
