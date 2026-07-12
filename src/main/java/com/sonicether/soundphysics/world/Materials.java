@@ -31,6 +31,16 @@ public final class Materials {
 
 	public static final int COUNT = 12;
 
+	// Occupancy classes, encoded in the texel's top two bits (material keeps
+	// the low six): half-blocks only fill half their voxel, and transmission
+	// marches clip against the occupied half so sound passes the open one.
+	public static final byte SHAPE_FULL = 0;
+	public static final byte SHAPE_SLAB = 1; // meta bit 8 = top half
+	public static final byte SHAPE_STAIR = 2; // meta bit 4 = upside-down (top half)
+
+	public static final int OCC_BOTTOM = 1;
+	public static final int OCC_TOP = 2;
+
 	// Per-block transmission factor (fraction of energy passing one block).
 	// Tuning constants; reflectivities come from Config, these do not.
 	private static final float[] TRANSMISSION = {
@@ -48,9 +58,10 @@ public final class Materials {
 			0.75f, // sparse
 	};
 
-	// Lazy block-id → material LUT; -1 = not yet classified. 1.7.10 block ids
-	// are hard-capped at 4096.
+	// Lazy block-id → material/shape LUTs; -1 = not yet classified. 1.7.10
+	// block ids are hard-capped at 4096.
 	private final byte[] lutByBlockId = new byte[4096];
+	private final byte[] shapeByBlockId = new byte[4096];
 
 	public Materials() {
 		java.util.Arrays.fill(lutByBlockId, (byte) -1);
@@ -59,16 +70,30 @@ public final class Materials {
 	public byte idFor(final int blockId) {
 		final byte cached = lutByBlockId[blockId];
 		if (cached >= 0) return cached;
-		final byte classified = classify(Block.getBlockById(blockId));
-		lutByBlockId[blockId] = classified;
-		return classified;
+		final Block block = Block.getBlockById(blockId);
+		lutByBlockId[blockId] = classify(block);
+		shapeByBlockId[blockId] = shapeOf(block);
+		return lutByBlockId[blockId];
+	}
+
+	/** Valid after {@link #idFor} classified the id (the copy loop calls it first). */
+	public byte shapeFor(final int blockId) {
+		return shapeByBlockId[blockId];
+	}
+
+	private static byte shapeOf(final Block block) {
+		if (block instanceof net.minecraft.block.BlockSlab) return SHAPE_SLAB;
+		if (block instanceof net.minecraft.block.BlockStairs) return SHAPE_STAIR;
+		return SHAPE_FULL;
 	}
 
 	/**
-	 * Palette UBO contents: std140 array of vec4 {reflectivity, transmission,
-	 * 0, 0}, one per material id. Reflectivities are the existing config
-	 * values scaled by the global reflectance, exactly like the old
-	 * getBlockReflectivity.
+	 * Palette UBO contents: std140 array of vec4 {reflectivity, transmission
+	 * (high band), transmission (low band), 0}, one per material id. Low
+	 * frequencies pass matter more easily — sqrt of the high-band value —
+	 * which is what makes bass audible through walls. Reflectivities are the
+	 * existing config values scaled by the global reflectance, exactly like
+	 * the old getBlockReflectivity.
 	 */
 	public static void writePalette(final float[] out256x4) {
 		final float[] reflectivity = {
@@ -93,6 +118,7 @@ public final class Materials {
 			final float transmission = (float) Math.pow(TRANSMISSION[id], Config.globalBlockAbsorption);
 			out256x4[id * 4] = scaled;
 			out256x4[id * 4 + 1] = id == AIR ? 1.0f : transmission;
+			out256x4[id * 4 + 2] = id == AIR ? 1.0f : (float) Math.sqrt(transmission);
 		}
 	}
 

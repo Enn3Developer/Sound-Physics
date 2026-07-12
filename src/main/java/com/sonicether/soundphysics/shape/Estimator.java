@@ -39,6 +39,11 @@ public final class Estimator {
 	// Hysteresis: params are emitted only when the change is audible.
 	private static final float AUDIBLE_DELTA = 0.01f;
 
+	// Echo signature: a strong long-delay return with nothing early — one
+	// distant wall across open space. Send 3 then steals the echo slot.
+	private static final float ECHO_MIN_LATE = 0.25f;
+	private static final float ECHO_MAX_EARLY = 0.12f;
+
 	private Estimator() {
 	}
 
@@ -58,12 +63,15 @@ public final class Estimator {
 	 * whole ray fan); the stored {@code samples} only distribute it: delay
 	 * crossfade (with the final leg to the listener folded in, like the old
 	 * escape leg), measured final-leg transmission, and HF emphasis.
-	 * {@code directTransmission} is the latest measured direct-path value (1.0
-	 * until the first direct ray lands).
+	 * {@code directHigh}/{@code directLow} are the latest measured direct-path
+	 * transmissions per band (1.0 until the first direct ray lands): the high
+	 * band drives the lowpass cutoff, the low band the broadband gain — which
+	 * is what lets bass through walls.
 	 */
 	public static SoundEnvironment estimate(final PathSample[][] samples, final float[] bucketEnergy,
-			final float directTransmission, final float listenerX, final float listenerY, final float listenerZ) {
-		if (samples == null) return neutral(directTransmission);
+			final float directHigh, final float directLow,
+			final float listenerX, final float listenerY, final float listenerZ) {
+		if (samples == null) return neutral(directHigh, directLow);
 
 		final float[] sendEnergy = new float[Cell.BUCKETS];
 		final float[] transWeighted = new float[Cell.BUCKETS];
@@ -95,13 +103,15 @@ public final class Estimator {
 		// Directionality preservation, inherited: when reflected paths reach the
 		// listener freely (the shared-airspace analog), let some filtered direct
 		// signal through even if the straight line is blocked.
-		final float openness = transSum * 0.25f;
-		final float directCutoff = Math.max((float) Math.pow(openness, 0.5) * 0.2f, directTransmission);
-		final float directGain = (float) Math.pow(directCutoff, 0.1);
+		final float opennessFloor = (float) Math.pow(transSum * 0.25f, 0.5) * 0.2f;
+		final float directCutoff = Math.max(opennessFloor, directHigh);
+		final float directGain = (float) Math.pow(Math.max(opennessFloor, directLow), 0.1);
+
+		final boolean echoing = sendGain[3] > ECHO_MIN_LATE && sendGain[0] + sendGain[1] < ECHO_MAX_EARLY;
 
 		return new SoundEnvironment(sendGain[0], sendGain[1], sendGain[2], sendGain[3],
 				sendCutoff[0], sendCutoff[1], sendCutoff[2], sendCutoff[3],
-				directCutoff, directGain, 1.0f);
+				directCutoff, directGain, 1.0f, echoing ? sendGain[3] : 0.0f);
 	}
 
 	/** Hysteresis: emit only when the change is audible. */
@@ -116,7 +126,8 @@ public final class Estimator {
 				|| Math.abs(a.sendCutoff2 - b.sendCutoff2) > AUDIBLE_DELTA
 				|| Math.abs(a.sendCutoff3 - b.sendCutoff3) > AUDIBLE_DELTA
 				|| Math.abs(a.directCutoff - b.directCutoff) > AUDIBLE_DELTA
-				|| Math.abs(a.directGain - b.directGain) > AUDIBLE_DELTA;
+				|| Math.abs(a.directGain - b.directGain) > AUDIBLE_DELTA
+				|| Math.abs(a.echoSend - b.echoSend) > AUDIBLE_DELTA;
 	}
 
 	// One bucket's contribution: the measured energy density is split across
@@ -145,8 +156,10 @@ public final class Estimator {
 			final float pathDistance = Math.max(sample.totalDistance(), 0.0f) + legDistance;
 			final float delay = pathDistance * DELAY_PER_BLOCK * sample.chainReflectivity();
 
+			// Low band carries the reflected energy (bass survives the final
+			// leg better); the high band shapes the cutoffs below.
 			final float share = Math.max(sample.energy(), 1e-6f) / bucketWeight;
-			final float energy = bucketEnergy * share * sample.legTransmission() * ENERGY_SCALE;
+			final float energy = bucketEnergy * share * sample.legTransmissionLow() * ENERGY_SCALE;
 
 			for (int send = 0; send < Cell.BUCKETS; send++) {
 				final float cross = send < 3
@@ -162,10 +175,10 @@ public final class Estimator {
 		}
 	}
 
-	private static SoundEnvironment neutral(final float directTransmission) {
-		final float directGain = (float) Math.pow(Math.max(directTransmission, 0.0f), 0.1);
+	private static SoundEnvironment neutral(final float directHigh, final float directLow) {
+		final float directGain = (float) Math.pow(Math.max(directLow, 0.0f), 0.1);
 		return new SoundEnvironment(0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 1.0f, 1.0f, 1.0f,
-				Math.max(directTransmission, 0.0f), directGain, 1.0f);
+				Math.max(directHigh, 0.0f), directGain, 1.0f);
 	}
 
 	private static float clamp01(final float value) {

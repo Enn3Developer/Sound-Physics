@@ -1,6 +1,7 @@
 package com.sonicether.soundphysics.efx;
 
 import com.sonicether.soundphysics.Config;
+import com.sonicether.soundphysics.ListenerState;
 import com.sonicether.soundphysics.ReverbParams;
 import com.sonicether.soundphysics.SoundEnvironment;
 import com.sonicether.soundphysics.SoundPhysics;
@@ -37,6 +38,14 @@ public class EfxPipeline {
 	private int sendFilter1;
 	private int sendFilter2;
 	private int sendFilter3;
+	// Fifth slot: AL_EFFECT_ECHO. Send 3 steals it when the environment shows
+	// the "one distant wall across open space" signature (env.echoSend > 0).
+	// EFX caps echo delay at 207 ms — a slapback train, not a canyon repeat.
+	private int echoSlot;
+	private int echoEffect;
+
+	// Base (preset) decay HF ratios, modulated by measured surface brightness.
+	private static final float[] PRESET_DECAY_HF = { 0.6f, 0.7f, 0.7f, 0.7f };
 
 	// Number of reverb sends apply() actually routes, from index 0 up. The game
 	// path leaves this at the full 4; the voice path lowers it to however many
@@ -113,6 +122,17 @@ public class EfxPipeline {
 		sendFilter3 = genLowpassFilter();
 		SoundPhysics.checkErrorLog("Error creating lowpass filters!");
 
+		echoSlot = genAuxSlot();
+		echoEffect = EXTEfx.alGenEffects();
+		EXTEfx.alEffecti(echoEffect, EXTEfx.AL_EFFECT_TYPE, EXTEfx.AL_EFFECT_ECHO);
+		EXTEfx.alEffectf(echoEffect, EXTEfx.AL_ECHO_DELAY, 0.207f);
+		EXTEfx.alEffectf(echoEffect, EXTEfx.AL_ECHO_LRDELAY, 0.207f);
+		EXTEfx.alEffectf(echoEffect, EXTEfx.AL_ECHO_DAMPING, 0.6f);
+		EXTEfx.alEffectf(echoEffect, EXTEfx.AL_ECHO_FEEDBACK, 0.45f);
+		EXTEfx.alEffectf(echoEffect, EXTEfx.AL_ECHO_SPREAD, -0.3f);
+		EXTEfx.alAuxiliaryEffectSloti(echoSlot, EXTEfx.AL_EFFECTSLOT_EFFECT, echoEffect);
+		SoundPhysics.checkErrorLog("Error creating echo effect!");
+
 		return this;
 	}
 
@@ -146,24 +166,65 @@ public class EfxPipeline {
 
 	/**
 	 * Applies a computed environment to an AL source: send filters and slot
-	 * routing for sends 0-3, then the direct lowpass filter, then the air
-	 * absorption factor.
+	 * routing for sends 0-3 (send 3 steals the echo slot when the environment
+	 * says so), then the direct lowpass filter, then the air absorption
+	 * factor. Ears-wet and weather-absorption presentation is applied here so
+	 * every path (game play thread, worker, voice audio thread) gets it.
 	 */
 	public void apply(final int sourceID, final SoundEnvironment env) {
+		final boolean earsWet = ListenerState.earsWet;
+		final float wetCutoff = earsWet ? 0.4f : 1.0f;
+		final float wetDirect = earsWet ? 1.0f - Config.underwaterFilter : 1.0f;
+
 		// Set reverb send filter values and route the source to each reverb fx slot,
 		// but only for sends the context actually granted (activeSends). The direct
 		// filter and air absorption below always apply.
-		if (activeSends > 0) routeSend(sourceID, 0, auxFXSlot0, sendFilter0, env.sendGain0, env.sendCutoff0);
-		if (activeSends > 1) routeSend(sourceID, 1, auxFXSlot1, sendFilter1, env.sendGain1, env.sendCutoff1);
-		if (activeSends > 2) routeSend(sourceID, 2, auxFXSlot2, sendFilter2, env.sendGain2, env.sendCutoff2);
-		if (activeSends > 3) routeSend(sourceID, 3, auxFXSlot3, sendFilter3, env.sendGain3, env.sendCutoff3);
+		if (activeSends > 0) routeSend(sourceID, 0, auxFXSlot0, sendFilter0, env.sendGain0, env.sendCutoff0 * wetCutoff);
+		if (activeSends > 1) routeSend(sourceID, 1, auxFXSlot1, sendFilter1, env.sendGain1, env.sendCutoff1 * wetCutoff);
+		if (activeSends > 2) routeSend(sourceID, 2, auxFXSlot2, sendFilter2, env.sendGain2, env.sendCutoff2 * wetCutoff);
+		if (activeSends > 3) {
+			final boolean echoing = env.echoSend > 0.0f;
+			routeSend(sourceID, 3, echoing ? echoSlot : auxFXSlot3, sendFilter3,
+					echoing ? env.echoSend : env.sendGain3, env.sendCutoff3 * wetCutoff);
+		}
 
 		EXTEfx.alFilterf(directFilter0, EXTEfx.AL_LOWPASS_GAIN, env.directGain);
-		EXTEfx.alFilterf(directFilter0, EXTEfx.AL_LOWPASS_GAINHF, env.directCutoff);
+		EXTEfx.alFilterf(directFilter0, EXTEfx.AL_LOWPASS_GAINHF, env.directCutoff * wetDirect);
 		AL10.alSourcei(sourceID, EXTEfx.AL_DIRECT_FILTER, directFilter0);
 
 		AL10.alSourcef(sourceID, EXTEfx.AL_AIR_ABSORPTION_FACTOR,
-				MathHelper.clamp_float(Config.airAbsorption * env.airAbsorptionFactor, 0.0f, 10.0f));
+				MathHelper.clamp_float(Config.airAbsorption * env.airAbsorptionFactor
+						* ListenerState.weatherAbsorption, 0.0f, 10.0f));
+	}
+
+	/**
+	 * Listener-environment reverb dynamics: per-bucket reflection pan (listener
+	 * space, magnitude = directional agreement) and measured surface
+	 * brightness. Must run on a thread owning this pipeline's AL context (the
+	 * worker for the game pipeline, audioTick for the voice one).
+	 */
+	public void updateReverbDynamics(final float[] pan12, final float[] decayHf4) {
+		if (!isInitialized()) return;
+		final int[] effects = { reverb0, reverb1, reverb2, reverb3 };
+		final int[] slots = { auxFXSlot0, auxFXSlot1, auxFXSlot2, auxFXSlot3 };
+		final float[] pan = new float[3];
+		for (int bucket = 0; bucket < 4; bucket++) {
+			pan[0] = pan12[bucket * 3];
+			pan[1] = pan12[bucket * 3 + 1];
+			pan[2] = pan12[bucket * 3 + 2];
+			EXTEfx.alEffectfv(effects[bucket], EXTEfx.AL_EAXREVERB_REFLECTIONS_PAN, pan);
+			EXTEfx.alEffectfv(effects[bucket], EXTEfx.AL_EAXREVERB_LATE_REVERB_PAN, pan);
+			final float ratio = MathHelper.clamp_float(
+					PRESET_DECAY_HF[bucket] * decayHf4[bucket] * Config.globalReverbBrightness, 0.1f, 2.0f);
+			EXTEfx.alEffectf(effects[bucket], EXTEfx.AL_EAXREVERB_DECAY_HFRATIO, ratio);
+			// Parameter changes only reach the DSP when the effect is re-attached.
+			EXTEfx.alAuxiliaryEffectSloti(slots[bucket], EXTEfx.AL_EFFECTSLOT_EFFECT, effects[bucket]);
+		}
+	}
+
+	/** Speed-of-sound start delay: pause at play, the worker resumes when due. */
+	public void pauseForDelay(final int sourceID) {
+		AL10.alSourcePause(sourceID);
 	}
 
 	private static int genAuxSlot() {

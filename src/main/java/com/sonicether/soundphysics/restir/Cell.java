@@ -33,6 +33,16 @@ public final class Cell {
 	// multi-bounce chain in a mostly-open village reads like a cathedral. The
 	// stored samples shape WHERE energy goes; this says HOW MUCH there is.
 	private final float[] bucketEnergy = new float[BUCKETS];
+	private volatile boolean energyMeasured;
+
+	// Where this cell's rays start: the position of the first sound that
+	// activated it (real air where sound actually happens), falling back to
+	// the geometric cell center — which in a cave is frequently inside rock,
+	// where chains and gates go to die. Set once; samples revalidate from it.
+	private volatile float originX;
+	private volatile float originY;
+	private volatile float originZ;
+	private volatile boolean originSet;
 
 	public Cell(final int slotsPerBucket, final long nowMillis) {
 		final PathSample[][] initial = new PathSample[BUCKETS][];
@@ -55,12 +65,19 @@ public final class Cell {
 		return lastTouchedMillis;
 	}
 
-	/** Per-batch measurement: delivered candidate energy per bucket over rays fired. */
+	/**
+	 * Per-batch measurement: delivered candidate energy per bucket over rays
+	 * fired. The first real measurement snaps instead of easing in, so a fresh
+	 * cell is wet one worker tick after its first sound, not a quarter second
+	 * later — a moving player lives in fresh cells.
+	 */
 	public void updateBucketEnergy(final float[] deliveredPerBucket, final int rays) {
 		if (rays == 0) return;
+		final float alpha = energyMeasured ? 0.25f : 1.0f;
 		for (int bucket = 0; bucket < BUCKETS; bucket++) {
-			bucketEnergy[bucket] += 0.25f * (deliveredPerBucket[bucket] / rays - bucketEnergy[bucket]);
+			bucketEnergy[bucket] += alpha * (deliveredPerBucket[bucket] / rays - bucketEnergy[bucket]);
 		}
+		energyMeasured = true;
 	}
 
 	/** Merge inheritance: a neighbor's energy density, through the gate. */
@@ -73,6 +90,31 @@ public final class Cell {
 	/** Read-only for callers; starts at zero, so cold cells are dry, not wet. */
 	public float[] bucketEnergy() {
 		return bucketEnergy;
+	}
+
+	/** First activating sound donates the cell's ray origin. Idempotent. */
+	public void adoptOrigin(final float x, final float y, final float z) {
+		if (originSet) return;
+		originX = x;
+		originY = y;
+		originZ = z;
+		originSet = true;
+	}
+
+	public boolean hasOrigin() {
+		return originSet;
+	}
+
+	public float originX() {
+		return originX;
+	}
+
+	public float originY() {
+		return originY;
+	}
+
+	public float originZ() {
+		return originZ;
 	}
 
 	/**

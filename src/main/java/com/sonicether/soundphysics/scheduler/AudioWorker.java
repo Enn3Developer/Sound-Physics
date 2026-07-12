@@ -4,6 +4,7 @@ import com.sonicether.soundphysics.Config;
 import com.sonicether.soundphysics.SoundEnvironment;
 import com.sonicether.soundphysics.SoundPhysics;
 import com.sonicether.soundphysics.efx.ApplyQueue;
+import com.sonicether.soundphysics.efx.DynamicsState;
 import com.sonicether.soundphysics.efx.EfxPipeline;
 import com.sonicether.soundphysics.gpu.Batch;
 import com.sonicether.soundphysics.gpu.TraceContext;
@@ -189,6 +190,7 @@ public final class AudioWorker extends Thread {
 
 		// 3. Re-run the estimator for playing sources; push changed params.
 		estimateAndApply(listenerX, listenerY, listenerZ);
+		updateReverbDynamics(listenerX, listenerY, listenerZ);
 		applyQueue.drainTo(gamePipeline);
 
 		if (tick % 100 == 0) {
@@ -211,6 +213,13 @@ public final class AudioWorker extends Thread {
 
 	private void pollGameSources() {
 		for (final ActiveSources.GameSource source : sources.gameSources()) {
+			// Speed-of-sound delay: paused at play, resumed here when the
+			// wavefront arrives; exempt from liveness pruning until then.
+			if (source.resumeAtNanos != 0L) {
+				if (System.nanoTime() < source.resumeAtNanos) continue;
+				AL10.alSourcePlay(source.sourceId);
+				source.resumeAtNanos = 0L;
+			}
 			final int state = AL10.alGetSourcei(source.sourceId, AL10.AL_SOURCE_STATE);
 			if (state != AL10.AL_PLAYING) {
 				sources.remove(source);
@@ -227,15 +236,34 @@ public final class AudioWorker extends Thread {
 	private void collectHotCells(final long nowMillis) {
 		hotCells.clear();
 		hotKeys.clear();
-		for (final ActiveSources.GameSource source : sources.gameSources()) addHotCell(source.cellKey(), nowMillis);
-		for (final ActiveSources.Speaker speaker : sources.speakerSources()) addHotCell(speaker.cellKey(), nowMillis);
+		for (final ActiveSources.GameSource source : sources.gameSources()) {
+			addHotCell(source.cellKey(), nowMillis, source.x, source.y, source.z);
+		}
+		for (final ActiveSources.Speaker speaker : sources.speakerSources()) {
+			addHotCell(speaker.cellKey(), nowMillis, (float) speaker.x, (float) speaker.y, (float) speaker.z);
+		}
 	}
 
-	private void addHotCell(final long key, final long nowMillis) {
+	private void addHotCell(final long key, final long nowMillis, final float sourceX, final float sourceY,
+			final float sourceZ) {
 		if (!hotKeys.add(key)) return;
 		final Cell cell = store.getOrCreate(key, nowMillis);
+		cell.adoptOrigin(sourceX, sourceY + 0.3f, sourceZ);
 		cell.touch(nowMillis);
 		hotCells.add(new HotCell(key, cell));
+	}
+
+	// Ray origin for a cell: the adopted real-sound position, else the center.
+	private static float rayOriginX(final long key, final Cell cell) {
+		return cell.hasOrigin() ? cell.originX() : CellKeys.centerX(key);
+	}
+
+	private static float rayOriginY(final long key, final Cell cell) {
+		return cell.hasOrigin() ? cell.originY() : CellKeys.centerY(key);
+	}
+
+	private static float rayOriginZ(final long key, final Cell cell) {
+		return cell.hasOrigin() ? cell.originZ() : CellKeys.centerZ(key);
 	}
 
 	// --- Stage 4: batch composition (budget guarantees) -----------------------
@@ -251,23 +279,31 @@ public final class AudioWorker extends Thread {
 		// Direct rays: one per playing source, never through the reservoir.
 		for (final ActiveSources.GameSource source : sources.gameSources()) {
 			if (batch.full()) break;
-			batch.addMarch(source.x, source.y, source.z, listenerX, listenerY, listenerZ,
-					Batch.KIND_DIRECT, 0L, source, 0, null);
+			batch.addDirect(source.x, source.y, source.z, listenerX, listenerY, listenerZ, source);
 		}
 		for (final ActiveSources.Speaker speaker : sources.speakerSources()) {
 			if (batch.full()) break;
-			batch.addMarch((float) speaker.x, (float) speaker.y, (float) speaker.z,
-					listenerX, listenerY, listenerZ, Batch.KIND_DIRECT, 0L, speaker, 0, null);
+			batch.addDirect((float) speaker.x, (float) speaker.y, (float) speaker.z,
+					listenerX, listenerY, listenerZ, speaker);
 		}
 		final int directCount = batch.size();
 
-		// Connectivity refreshes: a cached trickle, not a per-batch cost.
+		// Connectivity refreshes: a cached trickle, not a per-batch cost. Gate
+		// endpoints prefer adopted origins — real air where sounds happen —
+		// over geometric centers, which cave walls frequently swallow.
 		final List<ConnectivityCache.PairKey> pending = connectivity.drainPending(CONNECTIVITY_PER_TICK);
 		for (final ConnectivityCache.PairKey pair : pending) {
 			if (batch.full()) break;
-			batch.addMarch(CellKeys.centerX(pair.low()), CellKeys.centerY(pair.low()), CellKeys.centerZ(pair.low()),
-					CellKeys.centerX(pair.high()), CellKeys.centerY(pair.high()), CellKeys.centerZ(pair.high()),
-					Batch.KIND_CONNECTIVITY, 0L, pair, 0, null);
+			final Cell low = store.get(pair.low());
+			final Cell high = store.get(pair.high());
+			final float lowX = low != null ? rayOriginX(pair.low(), low) : CellKeys.centerX(pair.low());
+			final float lowY = low != null ? rayOriginY(pair.low(), low) : CellKeys.centerY(pair.low());
+			final float lowZ = low != null ? rayOriginZ(pair.low(), low) : CellKeys.centerZ(pair.low());
+			final float highX = high != null ? rayOriginX(pair.high(), high) : CellKeys.centerX(pair.high());
+			final float highY = high != null ? rayOriginY(pair.high(), high) : CellKeys.centerY(pair.high());
+			final float highZ = high != null ? rayOriginZ(pair.high(), high) : CellKeys.centerZ(pair.high());
+			batch.addMarch(lowX, lowY, lowZ, highX, highY, highZ,
+					false, Batch.KIND_CONNECTIVITY, 0L, pair, 0, null);
 		}
 		final int connectivityCount = batch.size() - directCount;
 
@@ -282,7 +318,7 @@ public final class AudioWorker extends Thread {
 					final PathSample sample = samples[bucket][slot];
 					if (sample == null || batch.full()) continue;
 					batch.addMarch(sample.lastHitX(), sample.lastHitY(), sample.lastHitZ(),
-							listenerX, listenerY, listenerZ,
+							listenerX, listenerY, listenerZ, true,
 							Batch.KIND_FINAL_LEG, hot.key(), hot.cell(), bucket << 8 | slot, sample);
 					finalLegCount++;
 				}
@@ -298,7 +334,8 @@ public final class AudioWorker extends Thread {
 		int revalCount = 0;
 		for (final RevalEntry entry : revalEntries) {
 			if (revalCount >= revalAlloc || batch.full()) break;
-			batch.addChain(CellKeys.centerX(entry.key()), CellKeys.centerY(entry.key()), CellKeys.centerZ(entry.key()),
+			batch.addChain(rayOriginX(entry.key(), entry.cell()), rayOriginY(entry.key(), entry.cell()),
+					rayOriginZ(entry.key(), entry.cell()),
 					entry.sample().seedDirX(), entry.sample().seedDirY(), entry.sample().seedDirZ(),
 					entry.sample().bounces(), Batch.KIND_REVALIDATION, entry.key(), entry.cell(),
 					entry.bucket() << 8 | entry.slot(), entry.sample());
@@ -359,7 +396,7 @@ public final class AudioWorker extends Thread {
 			lengthSq = dx * dx + dy * dy + dz * dz;
 		} while (lengthSq < 1e-6f);
 		final float inv = (float) (1.0 / Math.sqrt(lengthSq));
-		batch.addChain(CellKeys.centerX(key), CellKeys.centerY(key), CellKeys.centerZ(key),
+		batch.addChain(rayOriginX(key, cell), rayOriginY(key, cell), rayOriginZ(key, cell),
 				dx * inv, dy * inv, dz * inv, MAX_BOUNCES, kind, key, cell, 0, null);
 	}
 
@@ -430,7 +467,7 @@ public final class AudioWorker extends Thread {
 			final PathSample sample = new PathSample(
 					batch.seedX[ray], batch.seedY[ray], batch.seedZ[ray], prefix + 1,
 					pipeline.resultFloat(base), pipeline.resultFloat(base + 1), pipeline.resultFloat(base + 2),
-					distance, energy, chainReflectivity, 1.0f, tick);
+					distance, energy, chainReflectivity, 1.0f, 1.0f, tick);
 			cell.offerCandidate(bucket, sample, sample.weight(), rng);
 		}
 	}
@@ -468,15 +505,35 @@ public final class AudioWorker extends Thread {
 	private void consumeFinalLeg(final int ray) {
 		final Cell cell = (Cell) batch.tag[ray];
 		final PathSample expected = (PathSample) batch.expected[ray];
-		final float transmission = pipeline.resultFloat(pipeline.resultBase(ray, 0) + 6);
+		final int base = pipeline.resultBase(ray, 0);
 		cell.replaceSlot(batch.meta[ray] >> 8, batch.meta[ray] & 0xFF, expected,
-				expected.withLegTransmission(transmission));
+				expected.withLegTransmission(pipeline.resultFloat(base + 6), pipeline.resultFloat(base + 4)));
 	}
 
 	private void consumeDirect(final int ray) {
-		final float transmission = pipeline.resultFloat(pipeline.resultBase(ray, 0) + 6);
-		if (batch.tag[ray] instanceof ActiveSources.GameSource source) source.directTransmission = transmission;
-		else if (batch.tag[ray] instanceof ActiveSources.Speaker speaker) speaker.directTransmission = transmission;
+		final int base = pipeline.resultBase(ray, 0);
+		final float high = pipeline.resultFloat(base + 6);
+		final float low = pipeline.resultFloat(base + 4);
+		if (batch.tag[ray] instanceof ActiveSources.GameSource source) {
+			logDirectDebug(source, high);
+			source.directTransmission = high;
+			source.directTransmissionLow = low;
+		} else if (batch.tag[ray] instanceof ActiveSources.Speaker speaker) {
+			speaker.directTransmission = high;
+			speaker.directTransmissionLow = low;
+		}
+	}
+
+	// Diagnosis aid, F3-flag gated: one line whenever a source's measured
+	// direct transmission moves appreciably, with the exact ray endpoints.
+	private void logDirectDebug(final ActiveSources.GameSource source, final float transmission) {
+		if (!Config.debugInfoShow) return;
+		if (Math.abs(transmission - source.directTransmission) < 0.05f) return;
+		SoundPhysics.log(String.format(java.util.Locale.ROOT,
+				"direct src=%d (%.2f, %.2f, %.2f) -> listener (%.2f, %.2f, %.2f) trans %.3f -> %.3f",
+				source.sourceId, source.x, source.y, source.z,
+				sectionCache.listenerX(), sectionCache.listenerY(), sectionCache.listenerZ(),
+				source.directTransmission, transmission));
 	}
 
 	private void consumeConnectivity(final int ray, final long nowMillis) {
@@ -519,9 +576,10 @@ public final class AudioWorker extends Thread {
 		for (final ActiveSources.GameSource source : sources.gameSources()) {
 			final Cell cell = store.get(source.cellKey());
 			final SoundEnvironment env = cell == null
-					? Estimator.estimate(null, null, source.directTransmission, listenerX, listenerY, listenerZ)
+					? Estimator.estimate(null, null, source.directTransmission, source.directTransmissionLow,
+							listenerX, listenerY, listenerZ)
 					: Estimator.estimate(cell.samples(), cell.bucketEnergy(), source.directTransmission,
-							listenerX, listenerY, listenerZ);
+							source.directTransmissionLow, listenerX, listenerY, listenerZ);
 			if (!Estimator.audiblyDiffers(source.lastApplied, env)) continue;
 			source.lastApplied = env;
 			applyQueue.push(source.sourceId, env);
@@ -529,13 +587,101 @@ public final class AudioWorker extends Thread {
 		for (final ActiveSources.Speaker speaker : sources.speakerSources()) {
 			final Cell cell = store.get(speaker.cellKey());
 			final SoundEnvironment env = cell == null
-					? Estimator.estimate(null, null, speaker.directTransmission, listenerX, listenerY, listenerZ)
+					? Estimator.estimate(null, null, speaker.directTransmission, speaker.directTransmissionLow,
+							listenerX, listenerY, listenerZ)
 					: Estimator.estimate(cell.samples(), cell.bucketEnergy(), speaker.directTransmission,
-							listenerX, listenerY, listenerZ);
+							speaker.directTransmissionLow, listenerX, listenerY, listenerZ);
 			if (!Estimator.audiblyDiffers(speaker.lastApplied, env)) continue;
 			speaker.lastApplied = env;
 			voiceSink.accept(speaker.id, env);
 		}
+	}
+
+	// --- Listener-environment reverb dynamics (directional reverb + material
+	// brightness): energy-weighted mean reflection direction and surface
+	// reflectivity per bucket, aggregated over hot cells, rotated into
+	// listener space and pushed to the reverb effects.
+
+	private final float[] dynPan = new float[12];
+	private final float[] dynHf = new float[4];
+	private final float[] lastDynPan = new float[12];
+	private final float[] lastDynHf = { 1.0f, 1.0f, 1.0f, 1.0f };
+
+	private void updateReverbDynamics(final float listenerX, final float listenerY, final float listenerZ) {
+		// Listener basis from the published look vector (matches the AL
+		// listener orientation): x right, y up, z backward.
+		final float fx = com.sonicether.soundphysics.ListenerState.forwardX;
+		final float fy = com.sonicether.soundphysics.ListenerState.forwardY;
+		final float fz = com.sonicether.soundphysics.ListenerState.forwardZ;
+		float rightX = -fz;
+		float rightZ = fx;
+		final float rightLen = (float) Math.sqrt(rightX * rightX + rightZ * rightZ);
+		if (rightLen < 1e-3f) {
+			rightX = 1.0f;
+			rightZ = 0.0f;
+		} else {
+			rightX /= rightLen;
+			rightZ /= rightLen;
+		}
+		// up = right × forward, with right = (rightX, 0, rightZ).
+		final float ux = -rightZ * fy;
+		final float uy = rightZ * fx - rightX * fz;
+		final float uz = rightX * fy;
+
+		for (int bucket = 0; bucket < Cell.BUCKETS; bucket++) {
+			float sumX = 0.0f;
+			float sumY = 0.0f;
+			float sumZ = 0.0f;
+			float sumW = 0.0f;
+			float sumRefl = 0.0f;
+			for (final HotCell hot : hotCells) {
+				for (final PathSample sample : hot.cell().samples()[bucket]) {
+					if (sample == null) continue;
+					float dx = sample.lastHitX() - listenerX;
+					float dy = sample.lastHitY() - listenerY;
+					float dz = sample.lastHitZ() - listenerZ;
+					final float len = (float) Math.sqrt(dx * dx + dy * dy + dz * dz);
+					if (len < 1e-3f) continue;
+					final float weight = sample.energy() * sample.legTransmissionLow();
+					sumX += dx / len * weight;
+					sumY += dy / len * weight;
+					sumZ += dz / len * weight;
+					sumW += weight;
+					sumRefl += sample.chainReflectivity() * weight;
+				}
+			}
+
+			if (sumW < 1e-4f) {
+				dynPan[bucket * 3] = 0.0f;
+				dynPan[bucket * 3 + 1] = 0.0f;
+				dynPan[bucket * 3 + 2] = 0.0f;
+				dynHf[bucket] = 1.0f;
+				continue;
+			}
+
+			// Mean direction length = agreement: omni fields pan to zero.
+			final float mx = sumX / sumW;
+			final float my = sumY / sumW;
+			final float mz = sumZ / sumW;
+			final float agreement = Math.min(1.0f, (float) Math.sqrt(mx * mx + my * my + mz * mz));
+			final float scale = agreement * 0.8f; // keep magnitude inside EFX range
+
+			dynPan[bucket * 3] = (mx * rightX + mz * rightZ) * scale;
+			dynPan[bucket * 3 + 1] = (mx * ux + my * uy + mz * uz) * scale;
+			dynPan[bucket * 3 + 2] = -(mx * fx + my * fy + mz * fz) * scale;
+			// Surface brightness: stone/metal keep highs ringing, cloth kills them.
+			dynHf[bucket] = 0.35f + 0.9f * (sumRefl / sumW);
+		}
+
+		float delta = 0.0f;
+		for (int i = 0; i < 12; i++) delta = Math.max(delta, Math.abs(dynPan[i] - lastDynPan[i]));
+		for (int i = 0; i < 4; i++) delta = Math.max(delta, Math.abs(dynHf[i] - lastDynHf[i]));
+		if (delta < 0.05f) return;
+
+		System.arraycopy(dynPan, 0, lastDynPan, 0, 12);
+		System.arraycopy(dynHf, 0, lastDynHf, 0, 4);
+		gamePipeline.updateReverbDynamics(dynPan, dynHf);
+		DynamicsState.publish(dynPan, dynHf);
 	}
 
 	private void publishStats() {

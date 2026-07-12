@@ -15,6 +15,13 @@ layout(local_size_x = 64) in;
 
 const uint TYPE_CHAIN = 0u;
 const uint TYPE_MARCH = 1u;
+const uint TYPE_DIRECT = 2u;
+
+// Diffraction bundle for direct occlusion: single-ray shadowing reads a lone
+// chest as a wall. Offset rays around both endpoints let sound bend around
+// block-sized obstacles at a discount; a real wall blocks the whole bundle.
+const float DIFFRACTION_OFFSET = 0.9;
+const float DIFFRACTION_DISCOUNT = 0.75;
 
 const uint FLAG_VALID = 1u;
 
@@ -34,7 +41,10 @@ struct Ray {
 
 struct Result {
     vec4 hitDist;    // xyz last hit / target, w total distance
-    vec4 payload;    // x energy, y avg chain reflectivity, z transmission, w = uintBitsToFloat(flags | bounces << 8)
+    // Chains: x energy, y avg chain reflectivity, z transmission.
+    // Marches: x low-band transmission, z high-band transmission.
+    // w = uintBitsToFloat(flags | bounces << 8) for both.
+    vec4 payload;
 };
 
 layout(std430, binding = 0) readonly buffer Rays { Ray rays[]; };
@@ -52,8 +62,24 @@ bool inWindow(ivec3 p) {
     return all(greaterThanEqual(d, ivec3(0))) && all(lessThan(d, ivec3(WINDOW)));
 }
 
-uint materialAt(ivec3 p) {
+// Texel layout: material id in the low 6 bits, occupancy class in the top 2
+// (0 = full voxel, 1 = bottom half, 2 = top half — slabs and stairs).
+uint texelAt(ivec3 p) {
     return texelFetch(voxels, p & (WINDOW - 1), 0).r;
+}
+
+// Length of [tA, tB] that actually lies inside the occupied half of a
+// half-block voxel. Sound passes the open half of slabs and stairs freely.
+float occupiedSpan(vec3 origin, vec3 dir, vec3 invDir, int voxelY, uint occ, float tA, float tB) {
+    if (occ == 0u) return tB - tA;
+    float lo = float(voxelY) + (occ == 2u ? 0.5 : 0.0);
+    float hi = lo + 0.5;
+    if (abs(dir.y) < 1e-6) {
+        return origin.y >= lo && origin.y <= hi ? tB - tA : 0.0;
+    }
+    float t0 = (lo - origin.y) * invDir.y;
+    float t1 = (hi - origin.y) * invDir.y;
+    return max(0.0, min(tB, max(t0, t1)) - max(tA, min(t0, t1)));
 }
 
 bool sectionEmpty(ivec3 p) {
@@ -66,7 +92,8 @@ struct Leg {
     vec3 normal;
     uint mat;
     float dist;       // distance covered along the leg
-    float trans;      // transmission accumulated along the leg
+    float trans;      // high-band transmission accumulated along the leg
+    float transLow;   // low-band transmission (lows pass matter more easily)
 };
 
 // Exit distance of the 16³ section containing `pos` along the ray.
@@ -81,8 +108,10 @@ float sectionExit(vec3 origin, vec3 invDir, ivec3 voxel) {
 // One straight leg: per-block DDA with empty-section skipping. stopAtReflective
 // distinguishes chain legs (reflect off solid) from marches (attenuate through
 // everything). The origin voxel never blocks (grace for sources embedded in a
-// block — the old 0.867 source offset, done properly).
-Leg traceLeg(vec3 origin, vec3 dir, float maxT, bool stopAtReflective) {
+// block — the old 0.867 source offset, done properly); extraGrace optionally
+// spares one more voxel (the listener's own — a head sharing a voxel row with
+// top-slabs must not hear the world through "solid wood").
+Leg traceLeg(vec3 origin, vec3 dir, float maxT, bool stopAtReflective, ivec3 extraGrace) {
     Leg leg;
     leg.hit = false;
     leg.hitPos = origin;
@@ -90,6 +119,7 @@ Leg traceLeg(vec3 origin, vec3 dir, float maxT, bool stopAtReflective) {
     leg.mat = 0u;
     leg.dist = maxT;
     leg.trans = 1.0;
+    leg.transLow = 1.0;
 
     vec3 safeDir = vec3(
             abs(dir.x) < 1e-8 ? 1e-8 : dir.x,
@@ -108,7 +138,7 @@ Leg traceLeg(vec3 origin, vec3 dir, float maxT, bool stopAtReflective) {
 
     for (int i = 0; i < 2048; i++) {
         float tNext = min(min(tMax.x, tMax.y), tMax.z);
-        bool grace = all(equal(voxel, graceVoxel));
+        bool grace = all(equal(voxel, graceVoxel)) || all(equal(voxel, extraGrace));
 
         if (!inWindow(voxel)) {
             // Open air beyond the window.
@@ -130,10 +160,13 @@ Leg traceLeg(vec3 origin, vec3 dir, float maxT, bool stopAtReflective) {
                 continue;
             }
         } else if (!grace) {
-            uint m = materialAt(voxel);
+            uint texel = texelAt(voxel);
+            uint m = texel & 0x3Fu;
             if (m != 0u) {
                 vec4 mat = material[m];
                 if (stopAtReflective && mat.y < REFLECT_THRESHOLD) {
+                    // Chains reflect off half-blocks as if full: stair roofs
+                    // must keep feeding the reverb.
                     leg.hit = true;
                     leg.mat = m;
                     leg.dist = t;
@@ -143,9 +176,12 @@ Leg traceLeg(vec3 origin, vec3 dir, float maxT, bool stopAtReflective) {
                     leg.normal = n;
                     return leg;
                 }
-                leg.trans *= pow(mat.y, min(tNext, maxT) - t);
-                if (leg.trans < MIN_TRANSMISSION) {
+                float span = occupiedSpan(origin, dir, invDir, voxel.y, texel >> 6, t, min(tNext, maxT));
+                leg.trans *= pow(mat.y, span);
+                leg.transLow *= pow(mat.z, span);
+                if (leg.transLow < MIN_TRANSMISSION) {
                     leg.trans = 0.0;
+                    leg.transLow = 0.0;
                     leg.dist = t;
                     return leg;
                 }
@@ -177,8 +213,9 @@ void chainRay(uint idx, Ray ray) {
     float dist = 0.0;
     float reflSum = 0.0;
 
+    const ivec3 noGrace = ivec3(0x7fffffff);
     for (int b = 0; b < maxBounces; b++) {
-        Leg leg = traceLeg(pos, dir, MAX_LEG, true);
+        Leg leg = traceLeg(pos, dir, MAX_LEG, true, noGrace);
         trans *= leg.trans;
         if (!leg.hit) return; // escaped to open air or absorbed; earlier prefixes stand
 
@@ -199,18 +236,60 @@ void chainRay(uint idx, Ray ray) {
     }
 }
 
+// Two-band transmission of one straight march: x = low band, y = high band.
+vec2 marchTrans(vec3 origin, vec3 target, bool graceTarget) {
+    vec3 delta = target - origin;
+    float len = length(delta);
+    if (len < 1e-3) return vec2(1.0);
+    ivec3 extraGrace = graceTarget ? ivec3(floor(target)) : ivec3(0x7fffffff);
+    Leg leg = traceLeg(origin, delta / len, len, false, extraGrace);
+    return vec2(leg.transLow, leg.trans);
+}
+
 void marchRay(uint idx, Ray ray) {
+    vec3 origin = ray.originType.xyz;
+    vec3 target = ray.dirParam.xyz;
+
+    // dirParam.w = 1 on listener-targeted rays: the target's own voxel never
+    // blocks. Connectivity gates pass 0 — a cell centered in a wall is sealed.
+    vec2 trans = marchTrans(origin, target, ray.dirParam.w > 0.5);
+    results[idx * 4u] = Result(vec4(target, length(target - origin)),
+            vec4(trans.x, 0.0, trans.y, uintBitsToFloat(FLAG_VALID)));
+}
+
+// Direct occlusion for one playing source: a nine-ray diffraction bundle.
+// Offsets are perpendicular to the ray, around the listener AND around the
+// source (a blocker hugging either endpoint needs the offset on its side to
+// clear it). Offset origins landing inside an adjacent block get that voxel
+// as their grace — the sound effectively radiates from the whole obstruction.
+void directRay(uint idx, Ray ray) {
     vec3 origin = ray.originType.xyz;
     vec3 target = ray.dirParam.xyz;
     vec3 delta = target - origin;
     float len = length(delta);
 
-    float trans = 1.0;
+    vec2 trans = vec2(1.0);
     if (len > 1e-3) {
-        Leg leg = traceLeg(origin, delta / len, len, false);
-        trans = leg.trans;
+        vec3 dir = delta / len;
+        vec3 perp = cross(dir, vec3(0.0, 1.0, 0.0));
+        perp = dot(perp, perp) < 1e-4 ? vec3(1.0, 0.0, 0.0) : normalize(perp);
+        vec3 vertical = normalize(cross(perp, dir));
+        vec3 offsetA = perp * DIFFRACTION_OFFSET;
+        vec3 offsetB = vertical * DIFFRACTION_OFFSET;
+
+        vec2 center = marchTrans(origin, target, true);
+        vec2 best = marchTrans(origin, target + offsetA, true);
+        best = max(best, marchTrans(origin, target - offsetA, true));
+        best = max(best, marchTrans(origin, target + offsetB, true));
+        best = max(best, marchTrans(origin, target - offsetB, true));
+        best = max(best, marchTrans(origin + offsetA, target, true));
+        best = max(best, marchTrans(origin - offsetA, target, true));
+        best = max(best, marchTrans(origin + offsetB, target, true));
+        best = max(best, marchTrans(origin - offsetB, target, true));
+
+        trans = max(center, best * DIFFRACTION_DISCOUNT);
     }
-    results[idx * 4u] = Result(vec4(target, len), vec4(0.0, 0.0, trans, uintBitsToFloat(FLAG_VALID)));
+    results[idx * 4u] = Result(vec4(target, len), vec4(trans.x, 0.0, trans.y, uintBitsToFloat(FLAG_VALID)));
 }
 
 void main() {
@@ -223,6 +302,8 @@ void main() {
     results[idx * 4u + 3u] = Result(vec4(0.0), vec4(0.0));
 
     Ray ray = rays[idx];
-    if (floatBitsToUint(ray.originType.w) == TYPE_MARCH) marchRay(idx, ray);
+    uint type = floatBitsToUint(ray.originType.w);
+    if (type == TYPE_DIRECT) directRay(idx, ray);
+    else if (type == TYPE_MARCH) marchRay(idx, ray);
     else chainRay(idx, ray);
 }

@@ -10,7 +10,9 @@ import com.sonicether.soundphysics.scheduler.ActiveSources;
 import com.sonicether.soundphysics.scheduler.AudioWorker;
 import com.sonicether.soundphysics.shape.Estimator;
 import com.sonicether.soundphysics.world.SectionCache;
+import net.minecraft.block.material.Material;
 import net.minecraft.client.Minecraft;
+import net.minecraft.util.MathHelper;
 import net.minecraft.world.World;
 
 import java.util.UUID;
@@ -100,18 +102,64 @@ public final class SoundPhysicsEngine {
 		// server's, but boundingBox.minY is unambiguously the feet.
 		final double eyeY = mc.thePlayer.boundingBox.minY + mc.thePlayer.getEyeHeight();
 		sectionCache.tick(world, mc.thePlayer.posX, eyeY, mc.thePlayer.posZ);
+		publishListenerState(mc, world, eyeY);
+	}
+
+	// Presentation-layer listener state: look vector (reverb panning is in
+	// listener space, matching the AL listener orientation), ears-wet flag and
+	// the snow air-absorption factor at the listener.
+	private void publishListenerState(final Minecraft mc, final World world, final double eyeY) {
+		final float yaw = (float) Math.toRadians(mc.thePlayer.rotationYaw);
+		final float pitch = (float) Math.toRadians(mc.thePlayer.rotationPitch);
+		ListenerState.forwardX = -MathHelper.sin(yaw) * MathHelper.cos(pitch);
+		ListenerState.forwardY = -MathHelper.sin(pitch);
+		ListenerState.forwardZ = MathHelper.cos(yaw) * MathHelper.cos(pitch);
+
+		ListenerState.earsWet = mc.thePlayer.isInsideOfMaterial(Material.water);
+		ListenerState.weatherAbsorption = snowAbsorptionAt(world,
+				(int) Math.floor(mc.thePlayer.posX), (int) Math.floor(eyeY), (int) Math.floor(mc.thePlayer.posZ));
+	}
+
+	// Snow dampens sound: when it's snowing on the listener, raise the air
+	// absorption with the storm's strength (inherited from the old tracer,
+	// reduced to a listener-area check on the client tick).
+	private static float snowAbsorptionAt(final World world, final int x, final int y, final int z) {
+		if (Config.snowAirAbsorptionFactor <= 1.0f) return 1.0f;
+		if (!world.isRaining()) return 1.0f;
+		if (!world.canBlockSeeTheSky(x, y, z)) return 1.0f;
+		if (world.getPrecipitationHeight(x, z) > y + 1) return 1.0f;
+		final boolean snowing = world.func_147478_e(x, y, z, false)
+				|| world.getBiomeGenForCoords(x, z).getEnableSnow();
+		if (!snowing) return 1.0f;
+		return Math.max(1.0f, Config.snowAirAbsorptionFactor * world.getRainStrength(1.0f));
 	}
 
 	// --- Play path: store query + estimate + apply, microseconds --------------
+
+	// Speed of sound: sources farther than this get their start delayed.
+	private static final float DELAY_MIN_DISTANCE = 20.0f;
+	private static final float SPEED_OF_SOUND = 340.0f;
 
 	public void onPlaySound(final float x, final float y, final float z, final int sourceId) {
 		final ActiveSources.GameSource source = sources.onPlay(sourceId, x, y, z);
 		final long now = System.currentTimeMillis();
 		final Cell cell = store.getOrCreate(source.cellKey(), now);
+		cell.adoptOrigin(x, y + 0.3f, z);
 		cell.touch(now);
 		if (!gamePipeline.isInitialized()) return;
+
+		// Propagation delay: thunder arrives late. Pause now (play thread owns
+		// the moment), the worker resumes when the wavefront gets here.
+		final double dx = x - sectionCache.listenerX();
+		final double dy = y - sectionCache.listenerY();
+		final double dz = z - sectionCache.listenerZ();
+		final double distance = Math.sqrt(dx * dx + dy * dy + dz * dz);
+		if (distance > DELAY_MIN_DISTANCE) {
+			gamePipeline.pauseForDelay(sourceId);
+			source.resumeAtNanos = System.nanoTime() + (long) (distance / SPEED_OF_SOUND * 1.0e9);
+		}
 		gamePipeline.apply(sourceId, Estimator.estimate(cell.samples(), cell.bucketEnergy(),
-				source.directTransmission, (float) sectionCache.listenerX(),
+				source.directTransmission, source.directTransmissionLow, (float) sectionCache.listenerX(),
 				(float) sectionCache.listenerY(), (float) sectionCache.listenerZ()));
 	}
 

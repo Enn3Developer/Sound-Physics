@@ -163,10 +163,14 @@ public final class SectionCache {
 	}
 
 	// Copy + classify one 16³ section into GL upload order (x fastest, then y
-	// rows, then z slices). Returns ALL_AIR when nothing acoustic was found.
+	// rows, then z slices). Texel = material | occupancy << 6; slabs and
+	// stairs mark which half of the voxel they fill (from metadata) so the
+	// tracer can pass sound through the open half. Returns ALL_AIR when
+	// nothing acoustic was found.
 	private byte[] classifySection(final ExtendedBlockStorage storage) {
 		final byte[] lsb = storage.getBlockLSBArray();
 		final NibbleArray msb = storage.getBlockMSBArray();
+		final NibbleArray meta = storage.getMetadataArray();
 		final byte[] out = new byte[4096];
 		boolean allAir = true;
 
@@ -179,12 +183,20 @@ public final class SectionCache {
 					if (blockId == 0) continue;
 					final byte material = materials.idFor(blockId);
 					if (material == Materials.AIR) continue;
-					out[(z * 16 + y) * 16 + x] = material;
+					out[(z * 16 + y) * 16 + x] = (byte) (material | occupancyOf(blockId, meta, x, y, z) << 6);
 					allAir = false;
 				}
 			}
 		}
 		return allAir ? ALL_AIR : out;
+	}
+
+	private int occupancyOf(final int blockId, final NibbleArray meta, final int x, final int y, final int z) {
+		final byte shape = materials.shapeFor(blockId);
+		if (shape == Materials.SHAPE_FULL || meta == null) return 0;
+		final int blockMeta = meta.get(x, y, z);
+		if (shape == Materials.SHAPE_SLAB) return (blockMeta & 8) != 0 ? Materials.OCC_TOP : Materials.OCC_BOTTOM;
+		return (blockMeta & 4) != 0 ? Materials.OCC_TOP : Materials.OCC_BOTTOM;
 	}
 
 	private boolean withinRadius(final long key) {

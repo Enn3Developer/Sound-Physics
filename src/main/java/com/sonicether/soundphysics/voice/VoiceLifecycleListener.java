@@ -95,10 +95,23 @@ public final class VoiceLifecycleListener implements IAudioLifecycleListener {
 		SoundPhysics.log("Voice: reverb presets re-applied after config change.");
 	}
 
+	// Reverb dynamics (directional pan + material brightness) last applied to
+	// the voice context; refreshed by version. Voice audio thread only.
+	private int dynamicsVersion = -1;
+	private final float[] dynamicsPan = new float[12];
+	private final float[] dynamicsHf = new float[4];
+
 	@Override
 	public void audioTick() {
 		final EfxPipeline p = pipeline;
 		if (p == null) return;
+
+		// The worker publishes listener-environment reverb dynamics; this
+		// context is thread-local, so they must be applied from here.
+		if (com.sonicether.soundphysics.efx.DynamicsState.version() != dynamicsVersion) {
+			dynamicsVersion = com.sonicether.soundphysics.efx.DynamicsState.copyInto(dynamicsPan, dynamicsHf);
+			p.updateReverbDynamics(dynamicsPan, dynamicsHf);
+		}
 
 		// Cheap AL writes only — this runs inside the ~5 ms audio pump. The env was
 		// computed off-thread on the client tick; here we just apply it.

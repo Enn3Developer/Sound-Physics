@@ -24,6 +24,7 @@ public final class Batch {
 	// Must match trace.comp.
 	private static final int TYPE_CHAIN = 0;
 	private static final int TYPE_MARCH = 1;
+	private static final int TYPE_DIRECT = 2;
 	public static final int RAY_FLOATS = 8;
 
 	private final int capacity;
@@ -83,14 +84,34 @@ public final class Batch {
 		return slot;
 	}
 
-	/** Straight transmission march (final legs, direct rays, connectivity). */
+	/**
+	 * Straight transmission march (final legs, connectivity gates).
+	 * {@code graceTarget} skips attenuation inside the target's voxel — set for
+	 * listener-targeted rays (the listener's head being inside a voxel proves
+	 * it isn't blocking their ears; think top-slab ceilings sharing the head's
+	 * voxel row), never for connectivity gates (a neighbor cell centered in a
+	 * wall must stay sealed).
+	 */
 	public int addMarch(final float originX, final float originY, final float originZ,
-			final float targetX, final float targetY, final float targetZ,
+			final float targetX, final float targetY, final float targetZ, final boolean graceTarget,
 			final byte rayKind, final long rayCellKey, final Object rayTag, final int rayMeta,
 			final Object expectedSample) {
 		final int slot = writeCommon(originX, originY, originZ, TYPE_MARCH,
 				targetX, targetY, targetZ, rayKind, rayCellKey, rayTag, rayMeta, expectedSample);
-		floats.put(slot * RAY_FLOATS + 7, 0.0f);
+		floats.put(slot * RAY_FLOATS + 7, graceTarget ? 1.0f : 0.0f);
+		return slot;
+	}
+
+	/**
+	 * Direct source→listener occlusion: the shader traces a nine-ray
+	 * diffraction bundle in one invocation, so a lone block beside either
+	 * endpoint doesn't read as a wall.
+	 */
+	public int addDirect(final float originX, final float originY, final float originZ,
+			final float targetX, final float targetY, final float targetZ, final Object rayTag) {
+		final int slot = writeCommon(originX, originY, originZ, TYPE_DIRECT,
+				targetX, targetY, targetZ, KIND_DIRECT, 0L, rayTag, 0, null);
+		floats.put(slot * RAY_FLOATS + 7, 1.0f);
 		return slot;
 	}
 

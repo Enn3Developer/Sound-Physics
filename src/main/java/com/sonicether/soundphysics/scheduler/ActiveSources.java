@@ -23,6 +23,9 @@ public final class ActiveSources {
 		public volatile float y;
 		public volatile float z;
 		public volatile float directTransmission = 1.0f;
+		public volatile float directTransmissionLow = 1.0f;
+		// Speed-of-sound start delay: paused at play, resumed by the worker.
+		public volatile long resumeAtNanos;
 		// Worker-only.
 		SoundEnvironment lastApplied;
 
@@ -41,6 +44,7 @@ public final class ActiveSources {
 		public volatile double y;
 		public volatile double z;
 		public volatile float directTransmission = 1.0f;
+		public volatile float directTransmissionLow = 1.0f;
 		// Worker-only.
 		SoundEnvironment lastApplied;
 
@@ -67,6 +71,8 @@ public final class ActiveSources {
 		source.y = y;
 		source.z = z;
 		source.directTransmission = 1.0f;
+		source.directTransmissionLow = 1.0f;
+		source.resumeAtNanos = 0L;
 		source.lastApplied = null;
 		return source;
 	}
