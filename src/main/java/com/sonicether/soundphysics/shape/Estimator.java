@@ -40,8 +40,10 @@ public final class Estimator {
 	// Loudness curve for the direct path: gain = low-band transmission ^ this.
 	// The old 0.1 exponent turned ANY partial transmission into near-full
 	// volume (0.7 → 0.97), leaving all occlusion to the HF cutoff — a closed
-	// window sounded like an open door. 0.3 lets volume participate.
-	private static final float DIRECT_GAIN_EXPONENT = 0.3f;
+	// window sounded like an open door. 0.3 still compressed a plank wall
+	// (0.32 low) to 63% volume; 0.5 gives occlusion real dynamic range while
+	// keeping heavily damped paths audible.
+	private static final float DIRECT_GAIN_EXPONENT = 0.5f;
 
 	// Hysteresis: params are emitted only when the change is audible.
 	private static final float AUDIBLE_DELTA = 0.01f;
@@ -92,7 +94,13 @@ public final class Estimator {
 			final float energy = probe.energy()[bucket] * pathLow * ENERGY_SCALE;
 			if (energy <= 0.0f) continue;
 			final float reflectivity = Math.max(probe.reflectivity()[bucket], 0.05f);
-			final float delay = (probe.distance()[bucket] + effectiveDist) * DELAY_PER_BLOCK * reflectivity;
+			// Reflection path = chain out + return leg. The return leg is from
+			// the REFLECTION POINTS, not the source: for a click beside the
+			// listener in a cave, sound still travels out to the walls and
+			// back — the room size floors the delay, or nearby sounds dump
+			// all their reverb into the short quiet send and read as dry.
+			final float returnLeg = Math.max(probe.hitDistance()[bucket], effectiveDist);
+			final float delay = (probe.distance()[bucket] + returnLeg) * DELAY_PER_BLOCK * reflectivity;
 
 			// Crossfade into the four sends: triangular weights around delay
 			// centers 0/1/2, ramp ≥ 2 — inherited from accumulateSend.

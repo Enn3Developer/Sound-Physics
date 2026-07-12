@@ -66,6 +66,7 @@ public final class FieldStore {
 		final float[] energy = new float[buckets];
 		final float[] reflectivity = new float[buckets];
 		final float[] distance = new float[buckets];
+		final float[] hitDistance = new float[buckets];
 		final float[] dirX = new float[buckets];
 		final float[] dirY = new float[buckets];
 		final float[] dirZ = new float[buckets];
@@ -88,6 +89,7 @@ public final class FieldStore {
 				energy[bucket] += stats.energy()[bucket] * weight;
 				reflectivity[bucket] += stats.reflectivity()[bucket] * weight;
 				distance[bucket] += stats.distance()[bucket] * weight;
+				hitDistance[bucket] += stats.hitDistance()[bucket] * weight;
 				dirX[bucket] += stats.dirX()[bucket] * weight;
 				dirY[bucket] += stats.dirY()[bucket] * weight;
 				dirZ[bucket] += stats.dirZ()[bucket] * weight;
@@ -104,11 +106,12 @@ public final class FieldStore {
 			energy[bucket] *= inv;
 			reflectivity[bucket] *= inv;
 			distance[bucket] *= inv;
+			hitDistance[bucket] *= inv;
 			dirX[bucket] *= inv;
 			dirY[bucket] *= inv;
 			dirZ[bucket] *= inv;
 		}
-		return new CellProbe.Stats(energy, reflectivity, distance, dirX, dirY, dirZ,
+		return new CellProbe.Stats(energy, reflectivity, distance, hitDistance, dirX, dirY, dirZ,
 				escapeRatio * inv, escapeX * inv, escapeY * inv, escapeZ * inv);
 	}
 

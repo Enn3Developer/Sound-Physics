@@ -36,8 +36,6 @@ public final class SoundPhysicsEngine {
 	private final ListenerField listenerField = new ListenerField();
 	private final ActiveSources sources = new ActiveSources();
 	private final ApplyQueue applyQueue = new ApplyQueue();
-	private final com.sonicether.soundphysics.scheduler.RainProbes rainProbes =
-			new com.sonicether.soundphysics.scheduler.RainProbes();
 	private final EfxPipeline gamePipeline = new EfxPipeline();
 	private final AudioWorker worker;
 
@@ -83,8 +81,7 @@ public final class SoundPhysicsEngine {
 	}
 
 	private SoundPhysicsEngine(final TraceContext context) {
-		worker = new AudioWorker(context, sectionCache, field, listenerField, sources, applyQueue, gamePipeline,
-				rainProbes);
+		worker = new AudioWorker(context, sectionCache, field, listenerField, sources, applyQueue, gamePipeline);
 	}
 
 	// --- Client tick -----------------------------------------------------------
@@ -177,7 +174,8 @@ public final class SoundPhysicsEngine {
 		// audible. A direct-only source must not borrow the reverb of
 		// whatever cell happens to share its position.
 		// A sound from inside a solid block (block-place clicks) sits in a cell
-		// that is no graph node; it radiates from the adjacent air cell.
+		// that is no graph node; it radiates from the adjacent air cell. Rain
+		// placed at a gateway floors on the gateway path instead of the graph.
 		final float euclid = (float) distance;
 		final long resolved = listenerField.resolve(CellKeys.ofBlock(x, y, z));
 		final ListenerField.Node node = resolved == ListenerField.NO_NODE ? null : listenerField.sample(resolved);
@@ -193,94 +191,6 @@ public final class SoundPhysicsEngine {
 	public void applyPassthrough(final int sourceId) {
 		if (!gamePipeline.isInitialized()) return;
 		gamePipeline.apply(sourceId, SoundEnvironment.passthrough());
-	}
-
-	// Rain placement: how far around the listener to look for exposed columns,
-	// and the vertical window in which landing rain is considered audible.
-	private static final int RAIN_SEARCH_RADIUS = 10;
-	private static final int RAIN_MAX_ABOVE = 16;
-	private static final int RAIN_MAX_BELOW = 10;
-
-	/**
-	 * Rain-loop placement (client thread, from the EntityRenderer redirect).
-	 * Rain is distributed: the perceived origin is the best ACOUSTIC path, not
-	 * the nearest landing point — an open door beats a closer roof through
-	 * solid planks. Candidate columns (nearest exposed column per horizontal
-	 * sector + overhead) go to the worker's rain probes, which score them by
-	 * traced transmission; the sound plays from the measured winner. Until the
-	 * first measurement lands (~1 worker tick), fall back to the nearest
-	 * candidate. Volume and pitch are always the vanilla "normal" values —
-	 * occlusion is measured, not guessed.
-	 */
-	public void playRainSound(final World world, final double vanillaX, final double vanillaY,
-			final double vanillaZ, final String soundName, final boolean distanceDelay) {
-		final double px = sectionCache.listenerX();
-		final double py = sectionCache.listenerY();
-		final double pz = sectionCache.listenerZ();
-		final int baseX = (int) Math.floor(px);
-		final int baseZ = (int) Math.floor(pz);
-		final int eyeY = (int) Math.floor(py);
-
-		// Nearest exposed column per horizontal sector (8) + overhead (slot 8).
-		final double[] slotDistSq = new double[9];
-		final float[] slotPos = new float[9 * 3];
-		java.util.Arrays.fill(slotDistSq, Double.MAX_VALUE);
-
-		for (int dx = -RAIN_SEARCH_RADIUS; dx <= RAIN_SEARCH_RADIUS; dx++) {
-			for (int dz = -RAIN_SEARCH_RADIUS; dz <= RAIN_SEARCH_RADIUS; dz++) {
-				final int columnX = baseX + dx;
-				final int columnZ = baseZ + dz;
-				final int height = world.getPrecipitationHeight(columnX, columnZ);
-				if (height > eyeY + RAIN_MAX_ABOVE || height < eyeY - RAIN_MAX_BELOW) continue;
-				if (!world.getBiomeGenForCoords(columnX, columnZ).canSpawnLightningBolt()) continue;
-
-				final double soundX = columnX + 0.5;
-				final double soundY = height + 0.1;
-				final double soundZ = columnZ + 0.5;
-				final double ddx = soundX - px;
-				final double ddy = soundY - py;
-				final double ddz = soundZ - pz;
-				final double distSq = ddx * ddx + ddy * ddy + ddz * ddz;
-
-				final int slot = Math.abs(dx) <= 2 && Math.abs(dz) <= 2
-						? 8
-						: (int) ((Math.atan2(ddz, ddx) + Math.PI) / (2.0 * Math.PI) * 8.0) & 7;
-				if (distSq >= slotDistSq[slot]) continue;
-				slotDistSq[slot] = distSq;
-				slotPos[slot * 3] = (float) soundX;
-				slotPos[slot * 3 + 1] = (float) soundY;
-				slotPos[slot * 3 + 2] = (float) soundZ;
-			}
-		}
-
-		// Compact the filled slots into the probe set and find the nearest
-		// candidate as the pre-measurement fallback.
-		final float[] probes = new float[9 * 3];
-		int probeCount = 0;
-		double nearestSq = Double.MAX_VALUE;
-		double fallbackX = vanillaX;
-		double fallbackY = vanillaY;
-		double fallbackZ = vanillaZ;
-		for (int slot = 0; slot < 9; slot++) {
-			if (slotDistSq[slot] == Double.MAX_VALUE) continue;
-			probes[probeCount * 3] = slotPos[slot * 3];
-			probes[probeCount * 3 + 1] = slotPos[slot * 3 + 1];
-			probes[probeCount * 3 + 2] = slotPos[slot * 3 + 2];
-			probeCount++;
-			if (slotDistSq[slot] < nearestSq) {
-				nearestSq = slotDistSq[slot];
-				fallbackX = slotPos[slot * 3];
-				fallbackY = slotPos[slot * 3 + 1];
-				fallbackZ = slotPos[slot * 3 + 2];
-			}
-		}
-		rainProbes.setCandidates(java.util.Arrays.copyOf(probes, probeCount * 3));
-
-		final float[] best = rainProbes.freshBest();
-		final double soundX = best != null ? best[0] : fallbackX;
-		final double soundY = best != null ? best[1] : fallbackY;
-		final double soundZ = best != null ? best[2] : fallbackZ;
-		world.playSound(soundX, soundY, soundZ, soundName, 0.2f, 1.0f, distanceDelay);
 	}
 
 	// --- World hooks -----------------------------------------------------------

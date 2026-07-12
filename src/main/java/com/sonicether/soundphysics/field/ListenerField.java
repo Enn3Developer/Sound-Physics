@@ -37,6 +37,11 @@ public final class ListenerField {
 
 	private volatile HashMap<Long, Node> nodes = new HashMap<>();
 
+	/** The published node map; treat as immutable (worker swaps it wholesale). */
+	public java.util.Map<Long, Node> snapshot() {
+		return nodes;
+	}
+
 	/** No reached cell here or adjacent — sealed off or out of range. */
 	public static final long NO_NODE = Long.MIN_VALUE;
 

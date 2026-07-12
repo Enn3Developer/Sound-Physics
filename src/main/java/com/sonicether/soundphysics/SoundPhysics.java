@@ -179,22 +179,6 @@ public class SoundPhysics {
 	}
 
 	/**
-	 * CALLED BY Mixin INJECTED CODE! Rain-loop placement: anchor the sound to
-	 * the nearest rain-exposed column instead of vanilla's random pick, and
-	 * drop vanilla's above-head volume/pitch hack — muffling is measured here.
-	 */
-	public static void onPlayRainSound(final net.minecraft.world.World world, final double x, final double y,
-			final double z, final String soundName, final float volume, final float pitch,
-			final boolean distanceDelay) {
-		final SoundPhysicsEngine engine = SoundPhysicsEngine.instance();
-		if (engine == null) {
-			world.playSound(x, y, z, soundName, volume, pitch, distanceDelay);
-			return;
-		}
-		engine.playRainSound(world, x, y, z, soundName, distanceDelay);
-	}
-
-	/**
 	 * CALLED BY Mixin INJECTED CODE! Client-world block change → CPU section
 	 * cache dirty mark.
 	 */

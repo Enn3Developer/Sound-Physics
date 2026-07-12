@@ -51,7 +51,10 @@ public final class AudioWorker extends Thread {
 	private static final int UPLOADS_PER_TICK = 512;
 	private static final int UPDATED_DRAIN_PER_TICK = 1024;
 	private static final int PROBE_RAYS_PER_ROUND = 16;
-	private static final int MAX_EDGE_RAYS = 4;
+	private static final int MAX_PAIR_RAYS = 4;
+	private static final int FACE_RAYS = 4;
+	// Face apertures cost two legs each (anchor→opening→anchor).
+	private static final int MAX_EDGE_RAYS = MAX_PAIR_RAYS + FACE_RAYS * 2;
 	private static final int ANCHORS_PER_TICK = 256;
 	private static final int PATH_MAX_PORTALS = 32;
 	// Probe rounds age out so the EMA keeps converging (one round is noisy).
@@ -69,7 +72,6 @@ public final class AudioWorker extends Thread {
 	private final ActiveSources sources;
 	private final ApplyQueue applyQueue;
 	private final EfxPipeline gamePipeline;
-	private final RainProbes rainProbes;
 
 	private final VoxelStore voxels = new VoxelStore();
 	private final TracePipeline pipeline = new TracePipeline();
@@ -100,7 +102,7 @@ public final class AudioWorker extends Thread {
 
 	public AudioWorker(final TraceContext context, final SectionCache sectionCache, final FieldStore field,
 			final ListenerField listenerField, final ActiveSources sources, final ApplyQueue applyQueue,
-			final EfxPipeline gamePipeline, final RainProbes rainProbes) {
+			final EfxPipeline gamePipeline) {
 		super("SoundPhysics worker");
 		setDaemon(true);
 		this.context = context;
@@ -110,7 +112,6 @@ public final class AudioWorker extends Thread {
 		this.sources = sources;
 		this.applyQueue = applyQueue;
 		this.gamePipeline = gamePipeline;
-		this.rainProbes = rainProbes;
 	}
 
 	public void markPaletteDirty() {
@@ -187,7 +188,6 @@ public final class AudioWorker extends Thread {
 			pipeline.dispatch(batch, voxels);
 			if (pipeline.awaitResults(100_000_000L)) {
 				consumeResults();
-				rainProbes.selectBest(listenerX, listenerY, listenerZ);
 			} else {
 				abortBatchAccumulators();
 			}
@@ -273,13 +273,6 @@ public final class AudioWorker extends Thread {
 			batch.addDirect((float) speaker.x, (float) speaker.y, (float) speaker.z,
 					listenerX, listenerY, listenerZ, speaker, 0);
 		}
-		// Rain anchor probes: candidate landing columns, scored by measured
-		// transmission so an open door beats a nearer roof.
-		final float[] probes = rainProbes.beginMeasure();
-		for (int i = 0; i * 3 + 2 < probes.length && !batch.full(); i++) {
-			batch.addDirect(probes[i * 3], probes[i * 3 + 1], probes[i * 3 + 2],
-					listenerX, listenerY, listenerZ, rainProbes, i);
-		}
 		final int directCount = batch.size();
 
 		// Path validation: the graph proposed a route for each playing source;
@@ -305,7 +298,7 @@ public final class AudioWorker extends Thread {
 		stats.raysDirect = directCount;
 		stats.raysPath = pathCount;
 		int edgeRays = 0;
-		for (final EdgeBake bake : edgeBakes) edgeRays += bake.rays;
+		for (final EdgeBake bake : edgeBakes) edgeRays += bake.rays();
 		stats.raysEdge = edgeRays;
 		stats.raysProbe = batch.size() - probeEdgeStart - edgeRays;
 	}
@@ -400,11 +393,14 @@ public final class AudioWorker extends Thread {
 		final float[] pointsB = b.airPoints();
 		final int countA = pointsA.length / 3;
 		final int countB = pointsB.length / 3;
-		final int rays = Math.min(MAX_EDGE_RAYS, Math.max(countA, countB));
+		final int pairRays = Math.min(MAX_PAIR_RAYS, Math.max(countA, countB));
+
+		// Apertures first: their count sizes the bake.
+		final int openColumns = collectOpenFaceColumns(keyA, keyB);
 
 		edge.beginBake();
-		final EdgeBake bake = new EdgeBake(edge, rays);
-		for (int i = 0; i < rays && !batch.full(); i++) {
+		final EdgeBake bake = new EdgeBake(edge, pairRays, openColumns);
+		for (int i = 0; i < pairRays && !batch.full(); i++) {
 			final int ia = i % countA * 3;
 			final int ib = i % countB * 3;
 			computePortal(keyA, keyB, pointsA[ia], pointsA[ia + 1], pointsA[ia + 2],
@@ -412,7 +408,82 @@ public final class AudioWorker extends Thread {
 			batch.addMarch(pointsA[ia], pointsA[ia + 1], pointsA[ia + 2],
 					pointsB[ib], pointsB[ib + 1], pointsB[ib + 2], false, Batch.KIND_EDGE, bake, i);
 		}
+		// Each aperture is a two-leg bent path through the opening: anchor →
+		// opening → anchor, transmissions multiplied at commit. Short straight
+		// rays around the face were a disaster — a wall two blocks inside the
+		// cell either sat exactly past the ray's end or swallowed its origin
+		// into grace, reading solid walls as open air.
+		for (int f = 0; f < openColumns; f++) {
+			if (batch.full()) break;
+			final int portalIndex = pairRays + f;
+			final float px = faceScratch[f * 3];
+			final float py = faceScratch[f * 3 + 1];
+			final float pz = faceScratch[f * 3 + 2];
+			bake.portals[portalIndex * 3] = px;
+			bake.portals[portalIndex * 3 + 1] = py;
+			bake.portals[portalIndex * 3 + 2] = pz;
+			batch.addMarch(pointsA[0], pointsA[1], pointsA[2], px, py, pz,
+					false, Batch.KIND_EDGE, bake, pairRays + f * 2);
+			if (batch.full()) break;
+			batch.addMarch(px, py, pz, pointsB[0], pointsB[1], pointsB[2],
+					false, Batch.KIND_EDGE, bake, pairRays + f * 2 + 1);
+		}
 		edgeBakes.add(bake);
+	}
+
+	// Face-aperture scratch: up to FACE_RAYS x,y,z portal points per edge bake.
+	private final float[] faceScratch = new float[FACE_RAYS * 3];
+
+	// Exact aperture detection at voxel resolution: scan the 4×4 shared face
+	// for columns whose adjacent voxels are air on BOTH sides — a 1×2 doorway
+	// cannot hide from this the way it dodged stratified sample points (a
+	// door in face column 0 or 2 missed every quarter-point ray, which is why
+	// door state didn't move the edge). Open doors are classified as air by
+	// the section copier, so door toggles flip these columns deterministically.
+	// Returns the count and fills faceScratch with the portal points, spread
+	// across the found columns when there are more than FACE_RAYS.
+	private int collectOpenFaceColumns(final long keyA, final long keyB) {
+		final int size = CellKeys.CELL_SIZE;
+		final int axis = CellKeys.cellX(keyB) != CellKeys.cellX(keyA) ? 0
+				: CellKeys.cellY(keyB) != CellKeys.cellY(keyA) ? 1 : 2;
+		// positiveNeighbors guarantees B = A + 1 on the axis: the shared plane
+		// is B's min face; the voxel layers to test sit either side of it.
+		final int plane = size * (axis == 0 ? CellKeys.cellX(keyB)
+				: axis == 1 ? CellKeys.cellY(keyB) : CellKeys.cellZ(keyB));
+		final int minU = size * (axis == 0 ? CellKeys.cellY(keyA) : CellKeys.cellX(keyA));
+		final int minV = size * (axis == 2 ? CellKeys.cellY(keyA) : CellKeys.cellZ(keyA));
+
+		final int[] open = new int[size * size];
+		int found = 0;
+		for (int u = 0; u < size; u++) {
+			for (int v = 0; v < size; v++) {
+				final int x = axis == 0 ? plane : minU + u;
+				final int y = axis == 1 ? plane : axis == 0 ? minU + u : minV + v;
+				final int z = axis == 2 ? plane : minV + v;
+				final int insideX = axis == 0 ? plane - 1 : x;
+				final int insideY = axis == 1 ? plane - 1 : y;
+				final int insideZ = axis == 2 ? plane - 1 : z;
+				if (voxelOccupied(x, y, z) || voxelOccupied(insideX, insideY, insideZ)) continue;
+				open[found++] = u << 4 | v;
+			}
+		}
+		final int count = Math.min(found, FACE_RAYS);
+		for (int i = 0; i < count; i++) {
+			final int pick = open[i * found / count];
+			final float u = minU + (pick >> 4) + 0.5f;
+			final float v = minV + (pick & 15) + 0.5f;
+			faceScratch[i * 3] = axis == 0 ? plane : u;
+			faceScratch[i * 3 + 1] = axis == 1 ? plane : axis == 0 ? u : v;
+			faceScratch[i * 3 + 2] = axis == 2 ? plane : v;
+		}
+		return count;
+	}
+
+	private boolean voxelOccupied(final int x, final int y, final int z) {
+		if (y < 0 || y > 255) return false;
+		final byte[] section = sectionCache.section(SectionKeys.pack(x >> 4, y >> 4, z >> 4));
+		if (section == null || section == SectionCache.ALL_AIR) return false;
+		return section[((z & 15) * 16 + (y & 15)) * 16 + (x & 15)] != 0;
 	}
 
 	// Where the hero ray's segment crosses the shared face between the two
@@ -548,8 +619,6 @@ public final class AudioWorker extends Thread {
 		} else if (batch.tag[ray] instanceof ActiveSources.Speaker speaker) {
 			speaker.directTransmission = high;
 			speaker.directTransmissionLow = low;
-		} else if (batch.tag[ray] == rainProbes) {
-			rainProbes.report(batch.meta[ray], high, low);
 		}
 	}
 
@@ -793,6 +862,7 @@ public final class AudioWorker extends Thread {
 		final float[] energy = new float[CellProbe.BUCKETS];
 		final float[] reflectivityE = new float[CellProbe.BUCKETS];
 		final float[] distanceE = new float[CellProbe.BUCKETS];
+		final float[] hitDistanceE = new float[CellProbe.BUCKETS];
 		final float[] dirX = new float[CellProbe.BUCKETS];
 		final float[] dirY = new float[CellProbe.BUCKETS];
 		final float[] dirZ = new float[CellProbe.BUCKETS];
@@ -817,6 +887,7 @@ public final class AudioWorker extends Thread {
 			final float dz = hitZ - probe.anchorZ();
 			final float len = (float) Math.sqrt(dx * dx + dy * dy + dz * dz);
 			if (len < 1e-3f) return;
+			hitDistanceE[bucket] += len * delivered;
 			dirX[bucket] += dx / len * delivered;
 			dirY[bucket] += dy / len * delivered;
 			dirZ[bucket] += dz / len * delivered;
@@ -830,6 +901,7 @@ public final class AudioWorker extends Thread {
 			final float[] outEnergy = new float[CellProbe.BUCKETS];
 			final float[] outReflectivity = new float[CellProbe.BUCKETS];
 			final float[] outDistance = new float[CellProbe.BUCKETS];
+			final float[] outHitDistance = new float[CellProbe.BUCKETS];
 			final float[] outDirX = new float[CellProbe.BUCKETS];
 			final float[] outDirY = new float[CellProbe.BUCKETS];
 			final float[] outDirZ = new float[CellProbe.BUCKETS];
@@ -838,47 +910,79 @@ public final class AudioWorker extends Thread {
 				if (energy[bucket] <= 0.0f) continue;
 				outReflectivity[bucket] = reflectivityE[bucket] / energy[bucket];
 				outDistance[bucket] = distanceE[bucket] / energy[bucket];
+				outHitDistance[bucket] = hitDistanceE[bucket] / energy[bucket];
 				outDirX[bucket] = dirX[bucket] / energy[bucket];
 				outDirY[bucket] = dirY[bucket] / energy[bucket];
 				outDirZ[bucket] = dirZ[bucket] / energy[bucket];
 			}
 			final float escapeLen = (float) Math.sqrt(escapeX * escapeX + escapeY * escapeY + escapeZ * escapeZ);
 			final float inv = escapeLen > 1e-4f ? 1.0f / escapeLen : 0.0f;
-			probe.commitProbeRound(new CellProbe.Stats(outEnergy, outReflectivity, outDistance,
+			probe.commitProbeRound(new CellProbe.Stats(outEnergy, outReflectivity, outDistance, outHitDistance,
 					outDirX, outDirY, outDirZ,
 					(float) escapes / rays, escapeX * inv, escapeY * inv, escapeZ * inv), tick);
 		}
 	}
 
-	/** One edge's hero-ray fan: keeps the best ray and its portal. */
+	/**
+	 * One edge's hero-ray fan: straight anchor-pair rays plus two-leg aperture
+	 * paths (anchor→opening→anchor, legs multiplied). The best candidate's
+	 * transmission and portal win.
+	 */
 	private static final class EdgeBake {
 		final Edge edge;
-		final int rays;
-		final float[] portals;
-		float bestHigh = -1.0f;
-		float bestLow;
-		int bestRay;
+		final int pairCount;
+		final int faceCount;
+		final float[] portals; // (pairCount + faceCount) × xyz
+		final float[] high; // per ray slot: pairCount straight + faceCount × 2 legs
+		final float[] low;
+		final boolean[] landed;
 
-		EdgeBake(final Edge edge, final int rays) {
+		EdgeBake(final Edge edge, final int pairCount, final int faceCount) {
 			this.edge = edge;
-			this.rays = rays;
-			portals = new float[rays * 3];
+			this.pairCount = pairCount;
+			this.faceCount = faceCount;
+			portals = new float[(pairCount + faceCount) * 3];
+			high = new float[pairCount + faceCount * 2];
+			low = new float[pairCount + faceCount * 2];
+			landed = new boolean[pairCount + faceCount * 2];
 		}
 
-		void report(final int ray, final float high, final float low) {
-			if (high <= bestHigh) return;
-			bestHigh = high;
-			bestLow = low;
-			bestRay = ray;
+		int rays() {
+			return pairCount + faceCount * 2;
+		}
+
+		void report(final int ray, final float rayHigh, final float rayLow) {
+			high[ray] = rayHigh;
+			low[ray] = rayLow;
+			landed[ray] = true;
 		}
 
 		void commit() {
-			if (bestHigh < 0.0f) {
-				edge.abortBake(); // every ray of this fan was cut from the batch
+			float bestHigh = -1.0f;
+			float bestLow = 0.0f;
+			int bestPortal = -1;
+			for (int i = 0; i < pairCount; i++) {
+				if (!landed[i] || high[i] <= bestHigh) continue;
+				bestHigh = high[i];
+				bestLow = low[i];
+				bestPortal = i;
+			}
+			for (int f = 0; f < faceCount; f++) {
+				final int legA = pairCount + f * 2;
+				final int legB = legA + 1;
+				if (!landed[legA] || !landed[legB]) continue;
+				final float pathHigh = high[legA] * high[legB];
+				if (pathHigh <= bestHigh) continue;
+				bestHigh = pathHigh;
+				bestLow = low[legA] * low[legB];
+				bestPortal = pairCount + f;
+			}
+			if (bestPortal < 0) {
+				edge.abortBake(); // every candidate was cut from the batch
 				return;
 			}
 			edge.commitBake(bestHigh, bestLow,
-					portals[bestRay * 3], portals[bestRay * 3 + 1], portals[bestRay * 3 + 2]);
+					portals[bestPortal * 3], portals[bestPortal * 3 + 1], portals[bestPortal * 3 + 2]);
 		}
 	}
 

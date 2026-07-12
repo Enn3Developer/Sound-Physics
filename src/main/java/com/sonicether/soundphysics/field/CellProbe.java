@@ -22,13 +22,16 @@ public final class CellProbe {
 
 	/**
 	 * Aggregated probe round: per delay bucket the delivered energy per ray,
-	 * the energy-weighted surface reflectivity, chain distance and mean unit
-	 * direction from the anchor to the reflection points (its length ≤ 1
-	 * encodes directional agreement); plus the escape statistics — the
-	 * fraction of rays that found open sky and their mean direction, which is
-	 * where the openings are. Arrays are immutable after publication.
+	 * the energy-weighted surface reflectivity, chain distance, straight-line
+	 * span from the anchor to the reflection points ({@code hitDistance} — the
+	 * return leg of the reflection, which for a source beside the listener is
+	 * the room size, NOT the source-listener gap) and mean unit direction to
+	 * them (its length ≤ 1 encodes directional agreement); plus the escape
+	 * statistics — the fraction of rays that found open sky and their mean
+	 * direction, which is where the openings are. Arrays are immutable after
+	 * publication.
 	 */
-	public record Stats(float[] energy, float[] reflectivity, float[] distance,
+	public record Stats(float[] energy, float[] reflectivity, float[] distance, float[] hitDistance,
 			float[] dirX, float[] dirY, float[] dirZ,
 			float escapeRatio, float escapeX, float escapeY, float escapeZ) {
 	}
@@ -134,6 +137,7 @@ public final class CellProbe {
 		final float[] energy = new float[BUCKETS];
 		final float[] reflectivity = new float[BUCKETS];
 		final float[] distance = new float[BUCKETS];
+		final float[] hitDistance = new float[BUCKETS];
 		final float[] dirX = new float[BUCKETS];
 		final float[] dirY = new float[BUCKETS];
 		final float[] dirZ = new float[BUCKETS];
@@ -141,11 +145,12 @@ public final class CellProbe {
 			energy[bucket] = ema(previous.energy[bucket], round.energy[bucket]);
 			reflectivity[bucket] = ema(previous.reflectivity[bucket], round.reflectivity[bucket]);
 			distance[bucket] = ema(previous.distance[bucket], round.distance[bucket]);
+			hitDistance[bucket] = ema(previous.hitDistance[bucket], round.hitDistance[bucket]);
 			dirX[bucket] = ema(previous.dirX[bucket], round.dirX[bucket]);
 			dirY[bucket] = ema(previous.dirY[bucket], round.dirY[bucket]);
 			dirZ[bucket] = ema(previous.dirZ[bucket], round.dirZ[bucket]);
 		}
-		stats = new Stats(energy, reflectivity, distance, dirX, dirY, dirZ,
+		stats = new Stats(energy, reflectivity, distance, hitDistance, dirX, dirY, dirZ,
 				ema(previous.escapeRatio, round.escapeRatio),
 				ema(previous.escapeX, round.escapeX),
 				ema(previous.escapeY, round.escapeY),
