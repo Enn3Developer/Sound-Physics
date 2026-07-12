@@ -313,7 +313,9 @@ public final class AudioWorker extends Thread {
 	private void composePathValidation(final long cellKey, final float sourceX, final float sourceY,
 			final float sourceZ, final float listenerX, final float listenerY, final float listenerZ,
 			final Object target, final int budget) {
-		final int portals = listenerField.portalChain(cellKey, portalScratch);
+		final long resolved = listenerField.resolve(cellKey);
+		final int portals = resolved == ListenerField.NO_NODE ? -1
+				: listenerField.portalChain(resolved, portalScratch);
 		if (portals < 0 || budget - batch.size() < portals + 1) {
 			commitPathTransmission(target, Float.NaN, Float.NaN);
 			return;
@@ -622,7 +624,10 @@ public final class AudioWorker extends Thread {
 			return Estimator.estimate(null, 0.0f, 0.0f, euclid, euclid, directHigh, directLow);
 		}
 
-		final ListenerField.Node node = listenerField.sample(cellKey);
+		// A source in a solid, airless cell (block-place clicks) radiates from
+		// the adjacent air cell — that's the node and probe that apply.
+		final long resolved = listenerField.resolve(cellKey);
+		final ListenerField.Node node = resolved == ListenerField.NO_NODE ? null : listenerField.sample(resolved);
 		float pathHigh = node == null ? 0.0f : node.transHigh();
 		float pathLow = node == null ? 0.0f : node.transLow();
 		final float pathDist = node == null ? euclid : node.pathDist();
@@ -631,8 +636,8 @@ public final class AudioWorker extends Thread {
 			pathHigh = validatedHigh;
 			pathLow = validatedLow;
 		}
-		return Estimator.estimate(field.stats(cellKey), pathHigh, pathLow, pathDist, euclid,
-				directHigh, directLow);
+		return Estimator.estimate(field.stats(resolved == ListenerField.NO_NODE ? cellKey : resolved),
+				pathHigh, pathLow, pathDist, euclid, directHigh, directLow);
 	}
 
 	// --- Listener-environment reverb dynamics (directional reverb + material

@@ -37,9 +37,32 @@ public final class ListenerField {
 
 	private volatile HashMap<Long, Node> nodes = new HashMap<>();
 
+	/** No reached cell here or adjacent — sealed off or out of range. */
+	public static final long NO_NODE = Long.MIN_VALUE;
+
 	/** Play-path/worker query; null = unreached (sealed off or out of range). */
 	public Node sample(final long cellKey) {
 		return nodes.get(cellKey);
+	}
+
+	/**
+	 * The cell itself when reached, else its best-connected neighbor. Sources
+	 * embedded in solid blocks — block-place clicks, note blocks in walls —
+	 * sit in cells that are not graph nodes; acoustically they radiate from
+	 * the adjacent air, so that is the cell whose path and probe stats apply.
+	 */
+	public long resolve(final long cellKey) {
+		final HashMap<Long, Node> snapshot = nodes;
+		if (snapshot.containsKey(cellKey)) return cellKey;
+		long best = NO_NODE;
+		float bestTrans = -1.0f;
+		for (final long neighborKey : CellKeys.neighbors6(cellKey)) {
+			final Node node = snapshot.get(neighborKey);
+			if (node == null || node.transHigh() <= bestTrans) continue;
+			bestTrans = node.transHigh();
+			best = neighborKey;
+		}
+		return best;
 	}
 
 	public int size() {

@@ -176,13 +176,16 @@ public final class SoundPhysicsEngine {
 		// best-path diffraction floor that keeps around-the-corner sources
 		// audible. A direct-only source must not borrow the reverb of
 		// whatever cell happens to share its position.
+		// A sound from inside a solid block (block-place clicks) sits in a cell
+		// that is no graph node; it radiates from the adjacent air cell.
 		final float euclid = (float) distance;
-		final long cellKey = CellKeys.ofBlock(x, y, z);
-		final ListenerField.Node node = listenerField.sample(cellKey);
+		final long resolved = listenerField.resolve(CellKeys.ofBlock(x, y, z));
+		final ListenerField.Node node = resolved == ListenerField.NO_NODE ? null : listenerField.sample(resolved);
 		final float pathHigh = !directOnly && node != null ? node.transHigh() : 0.0f;
 		final float pathLow = !directOnly && node != null ? node.transLow() : 0.0f;
 		final float pathDist = node == null ? euclid : node.pathDist();
-		gamePipeline.apply(sourceId, Estimator.estimate(directOnly ? null : field.stats(cellKey),
+		gamePipeline.apply(sourceId, Estimator.estimate(
+				directOnly || resolved == ListenerField.NO_NODE ? null : field.stats(resolved),
 				pathHigh, pathLow, pathDist, euclid, onset[0], onset[1]));
 	}
 
