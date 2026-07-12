@@ -41,6 +41,77 @@ public final class FieldStore {
 		return probe == null ? null : probe.stats();
 	}
 
+	/**
+	 * Trilinear interpolation of probe stats at a world position, over the 8
+	 * cells whose centers surround it — the light-probe trick, so the room's
+	 * character glides as a position moves instead of stepping at every cell
+	 * boundary. Cells without stats (solid rock, unbaked) drop out and the
+	 * remaining weights renormalize: a wall beside the listener doesn't dim
+	 * the room. Null when nothing around is baked. Allocates the result; call
+	 * once per consumer per tick, not per ray.
+	 */
+	public CellProbe.Stats interpolatedStats(final float x, final float y, final float z) {
+		final int size = CellKeys.CELL_SIZE;
+		final float gridX = x / size - 0.5f;
+		final float gridY = y / size - 0.5f;
+		final float gridZ = z / size - 0.5f;
+		final int baseX = (int) Math.floor(gridX);
+		final int baseY = (int) Math.floor(gridY);
+		final int baseZ = (int) Math.floor(gridZ);
+		final float tx = gridX - baseX;
+		final float ty = gridY - baseY;
+		final float tz = gridZ - baseZ;
+
+		final int buckets = CellProbe.BUCKETS;
+		final float[] energy = new float[buckets];
+		final float[] reflectivity = new float[buckets];
+		final float[] distance = new float[buckets];
+		final float[] dirX = new float[buckets];
+		final float[] dirY = new float[buckets];
+		final float[] dirZ = new float[buckets];
+		float escapeRatio = 0.0f;
+		float escapeX = 0.0f;
+		float escapeY = 0.0f;
+		float escapeZ = 0.0f;
+		float totalWeight = 0.0f;
+
+		for (int corner = 0; corner < 8; corner++) {
+			final float weight = ((corner & 1) == 0 ? 1.0f - tx : tx)
+					* ((corner >> 1 & 1) == 0 ? 1.0f - ty : ty)
+					* ((corner >> 2 & 1) == 0 ? 1.0f - tz : tz);
+			if (weight <= 1e-4f) continue;
+			final CellProbe.Stats stats = stats(CellKeys.pack(
+					baseX + (corner & 1), baseY + (corner >> 1 & 1), baseZ + (corner >> 2 & 1)));
+			if (stats == null) continue;
+			totalWeight += weight;
+			for (int bucket = 0; bucket < buckets; bucket++) {
+				energy[bucket] += stats.energy()[bucket] * weight;
+				reflectivity[bucket] += stats.reflectivity()[bucket] * weight;
+				distance[bucket] += stats.distance()[bucket] * weight;
+				dirX[bucket] += stats.dirX()[bucket] * weight;
+				dirY[bucket] += stats.dirY()[bucket] * weight;
+				dirZ[bucket] += stats.dirZ()[bucket] * weight;
+			}
+			escapeRatio += stats.escapeRatio() * weight;
+			escapeX += stats.escapeX() * weight;
+			escapeY += stats.escapeY() * weight;
+			escapeZ += stats.escapeZ() * weight;
+		}
+		if (totalWeight < 1e-4f) return null;
+
+		final float inv = 1.0f / totalWeight;
+		for (int bucket = 0; bucket < buckets; bucket++) {
+			energy[bucket] *= inv;
+			reflectivity[bucket] *= inv;
+			distance[bucket] *= inv;
+			dirX[bucket] *= inv;
+			dirY[bucket] *= inv;
+			dirZ[bucket] *= inv;
+		}
+		return new CellProbe.Stats(energy, reflectivity, distance, dirX, dirY, dirZ,
+				escapeRatio * inv, escapeX * inv, escapeY * inv, escapeZ * inv);
+	}
+
 	public Edge edge(final long cellA, final long cellB) {
 		return edges.get(PairKey.of(cellA, cellB));
 	}

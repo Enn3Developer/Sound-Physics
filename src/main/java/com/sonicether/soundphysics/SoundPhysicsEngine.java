@@ -185,7 +185,7 @@ public final class SoundPhysicsEngine {
 		final float pathLow = !directOnly && node != null ? node.transLow() : 0.0f;
 		final float pathDist = node == null ? euclid : node.pathDist();
 		gamePipeline.apply(sourceId, Estimator.estimate(
-				directOnly || resolved == ListenerField.NO_NODE ? null : field.stats(resolved),
+				directOnly ? null : field.interpolatedStats(x, y, z),
 				pathHigh, pathLow, pathDist, euclid, onset[0], onset[1]));
 	}
 

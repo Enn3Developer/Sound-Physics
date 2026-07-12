@@ -196,7 +196,7 @@ public final class AudioWorker extends Thread {
 		// 3. The listener's view of the fresh field, then per-source params.
 		listenerField.rebuild(field, listenerKey, listenerX, listenerY, listenerZ, radiusCells);
 		estimateAndApply(listenerX, listenerY, listenerZ);
-		updateReverbDynamics(listenerKey);
+		updateReverbDynamics(listenerX, listenerY, listenerZ);
 		applyQueue.drainTo(gamePipeline);
 
 		if (tick % EVICT_INTERVAL_TICKS == 0) {
@@ -636,7 +636,7 @@ public final class AudioWorker extends Thread {
 			pathHigh = validatedHigh;
 			pathLow = validatedLow;
 		}
-		return Estimator.estimate(field.stats(resolved == ListenerField.NO_NODE ? cellKey : resolved),
+		return Estimator.estimate(field.interpolatedStats(sourceX, sourceY, sourceZ),
 				pathHigh, pathLow, pathDist, euclid, directHigh, directLow);
 	}
 
@@ -652,7 +652,7 @@ public final class AudioWorker extends Thread {
 	private final float[] lastDynPan = new float[12];
 	private final float[] lastDynHf = { 1.0f, 1.0f, 1.0f, 1.0f };
 
-	private void updateReverbDynamics(final long listenerKey) {
+	private void updateReverbDynamics(final float listenerX, final float listenerY, final float listenerZ) {
 		// Listener basis from the published look vector (matches the AL
 		// listener orientation): x right, y up, z backward.
 		final float fx = com.sonicether.soundphysics.ListenerState.forwardX;
@@ -673,7 +673,9 @@ public final class AudioWorker extends Thread {
 		final float uy = rightZ * fx - rightX * fz;
 		final float uz = rightX * fy;
 
-		final CellProbe.Stats stats = field.stats(listenerKey);
+		// Interpolated at the listener's exact position — the room's character
+		// glides across cell boundaries instead of stepping.
+		final CellProbe.Stats stats = field.interpolatedStats(listenerX, listenerY, listenerZ);
 		for (int bucket = 0; bucket < CellProbe.BUCKETS; bucket++) {
 			if (stats == null || stats.energy()[bucket] < 1e-5f) {
 				dynPan[bucket * 3] = 0.0f;
